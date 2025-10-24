@@ -19,57 +19,94 @@
 ## 环境准备（Windows, cmd）
 
 建议使用 Python 3.10+/CUDA 环境。
+# AIRender — 基于 SIREN 的 24 小时光照贴图压缩与重建
 
-```
-python -m venv .venv
-.venv\\Scripts\\activate
+一个轻量级的两阶段神经表示（neural representation）项目：
+
+- F1（坐标到潜变量）：把像素坐标 (x,y) 映射到每像素的潜变量向量 z；
+- F2（潜变量+时间到颜色）：把 z 与时间特征拼接后输出 RGB，能在任意时刻重建光照贴图。
+
+目标是使用一张 `latent_map.npy`（形状为 H×W×latent_dim）加上一个小型的 F2 模型，来表达并实时重建全天 24 小时的光照变化，从而大幅减少存储与部署成本。
+
+## 项目结构（主要文件）
+
+- `train.py`：训练脚本（支持在训练结束后导出 latent 与 F2）。
+- `export_latent.py`：从 checkpoint 导出 `latent_map.npy`、`f2_state_dict.pt` 和 `f2_ts.pt`（TorchScript）。
+- `infer.py`：使用 `latent_map.npy` + `f2_state_dict.pt` 或直接使用 `.ckpt` 渲染任意时刻的图像。
+- `src/models/siren.py`：SIREN（sin 激活）相关实现。
+- `src/models/compressor.py`：F1/F2/组合模型与 `compute_latent_map` 实现。
+- `src/data/lightmap_dataset.py`：加载 24 帧光照图并返回训练样本。
+- `src/utils/time_encoding.py`：时间 Fourier 编码（sin/cos）。
+
+## 从零到完成：一步步操作（Windows, cmd.exe）
+
+### 1) 准备环境
+
+推荐使用 Python 3.11。先创建并激活虚拟环境：
+
+```cmd
+conda create -n AIRender python=3.11
 pip install -r requirements.txt
 ```
 
-如需安装匹配 CUDA 的 PyTorch，请参考 https://pytorch.org/ 获取对应命令。
+### 2) 准备数据
 
-## 数据准备
-
-将 24 张同尺寸的光照贴图放在一个文件夹（如 `data/daylight`），支持 `.png/.jpg/.jpeg`。文件名按字典序排序后应对应从 `t=0..23`。
-```
-
-## 训练
+把 24 张同尺寸的光照贴图放到一个文件夹，例如：
 
 ```
-python train.py --data_dir data\\daylight --out_dir runs\\exp1 \
-  --epochs 200 --batch_size 65536 --latent_dim 16 --hidden_f1 32 --hidden_f2 64 \
-  --time_harmonics 2 --lr 1e-3
+D:\Project\AIRender\dataset\tod_output
 ```
 
-常用参数：
-- `--latent_dim`：潜变量维度（默认32），越大重建更准但“中间变量贴图”更大。
-- `--hidden_f1/hidden_f2`：F1/F2 隐藏层宽度（SIREN），越大会更准但实时成本更高。
-- `--time_harmonics`：时间Fourier频次K（每个k产生sin/cos两维）。
-- `--samples_per_epoch`：每个epoch随机采样的样本数（默认按图像总像素×24，可能很大，建议设置为几百万）。
+文件支持 `.png/.jpg/.jpeg`；按字典序排序后对应 t=0..23（如果不是 24 张，代码会给出警告但仍按排序进行索引）。
 
-训练结束会在 `out_dir` 下保存：
-- `last.ckpt`/`best.ckpt`
-- `latent_map.npy`：形状 `(H, W, latent_dim)` 的潜变量贴图。
-- `f2_state_dict.pt` 与 `f2_ts.pt`（TorchScript）
+### 3) 训练（示例）
 
-## 导出（如需单独运行）
-```
-python export_latent.py --ckpt runs\\exp1\\best.ckpt --out_dir exports\\exp1
+快速 CPU 调试（小规模）：
+```cmd
+python train.py --data_dir D:\Project\AIRender\dataset\tod_output --out_dir D:\Project\AIRender\runs\tod_cpu \
+  --epochs 5 --batch_size 4096 --latent_dim 16 --hidden_f1 16 --hidden_f2 32 \
+  --time_harmonics 2 --lr 1e-3 --num_workers 0 --samples_per_epoch 200000 --compute_latent
 ```
 
-## 推理重建
-```
-python infer.py --latent_path exports\\exp1\\latent_map.npy \
-  --f2_path exports\\exp1\\f2_state_dict.pt --time 12 \
-  --width 256 --height 256 --out out\\recon_12.png
-```
-
-也可直接使用 `--ckpt` 一步渲染（内部先算latent）：
-```
-python infer.py --ckpt runs\\exp1\\best.ckpt --time 18 --out out\\recon_18.png
+常规 GPU 训练（如果有 CUDA 且显存充足）：
+```cmd
+python train.py --data_dir D:\Project\AIRender\dataset\tod_output --out_dir D:\Project\AIRender\runs\tod_gpu \
+  --epochs 200 --batch_size 65536 --latent_dim 32 --hidden_f1 32 --hidden_f2 64 \
+  --time_harmonics 2 --lr 1e-3 --num_workers 0 --compute_latent
 ```
 
-## 备注
-- 所有坐标 `(x,y)` 归一化到 `[-1,1]`，时间 `t` 归一化到 `[0,1]` 并使用 sin/cos 编码。
-- 输出采用 Sigmoid 到 `[0,1]`，损失为 MSE。
-- 模型较小以利于实时：默认 F1 两层、F2 三层，可按需求调整。
+说明：
+- `--compute_latent`：训练结束后自动计算并保存 `latent_map.npy`、`f2_state_dict.pt` 和 `f2_ts.pt` 到 `--out_dir`。
+- 如遇 OOM（显存不足），请将 `--batch_size`、`--latent_dim` 或隐藏单元数调小，或降低 `--samples_per_epoch`。
+
+训练输出（`--out_dir`）通常包含：
+- `best.ckpt`, `last.ckpt`（检查点）
+- `latent_map.npy`（若使用 `--compute_latent` 或通过 `export_latent.py` 导出）
+- `f2_state_dict.pt`, `f2_ts.pt`
+
+### 4) 从 checkpoint 导出 latent_map（可选）
+
+如果你没有在训练时开启 `--compute_latent`，可以用 `export_latent.py` 单独导出：
+
+```cmd
+python export_latent.py --ckpt D:\Project\AIRender\runs\tod_cpu\best.ckpt --out_dir D:\Project\AIRender\exports\tod_cpu
+```
+
+导出后 `out_dir` 下会包含：
+- `latent_map.npy`（H×W×latent_dim）
+- `f2_state_dict.pt`（PyTorch state_dict）
+- `f2_ts.pt`（TorchScript，可直接部署）
+
+### 5) 推理 / 重建（示例）
+
+直接用 checkpoint（一键计算 latent 并渲染）：
+
+```cmd
+python infer.py --ckpt D:\Project\AIRender\runs\tod_cpu\best.ckpt --time 12 --out D:\Project\AIRender\out\recon_12.png
+```
+
+使用已导出的 `latent_map.npy` + `f2_state_dict.pt`（更快、适合部署）：
+
+```cmd
+python infer.py --latent_path D:\Project\AIRender\exports\tod_cpu\latent_map.npy --f2_path D:\Project\AIRender\exports\tod_cpu\f2_state_dict.pt --time 18 --out D:\Project\AIRender\out\recon_18.png
+```
