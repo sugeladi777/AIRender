@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 
 from .siren import SirenMLP
+from ..utils.encoding import encode_xy
 
 
 class F1Net(nn.Module):
@@ -15,11 +16,19 @@ class F1Net(nn.Module):
     - 输出：latent_dim 维的向量，可视为每像素的压缩表示
     """
     def __init__(self, latent_dim: int = 32, hidden: int = 32, layers: int = 4,
-                 first_omega_0: float = 30.0, hidden_omega_0: float = 30.0):
+                 first_omega_0: float = 30.0, hidden_omega_0: float = 30.0,
+                 xy_harmonics: int = 0, xy_include_input: bool = True):
         super().__init__()
+        self.xy_harmonics = xy_harmonics
+        self.xy_include_input = xy_include_input
+        in_features = (2 if xy_include_input else 0) + (4 * xy_harmonics)
+        if in_features == 0:
+            # 退化保护：至少保留原始 xy
+            in_features = 2
+            self.xy_include_input = True
         # 使用 SIREN MLP（sin 激活）以便拟合高频细节
         self.mlp = SirenMLP(
-            in_features=2,
+            in_features=in_features,
             hidden_features=hidden,
             hidden_layers=layers,
             out_features=latent_dim,
@@ -30,7 +39,11 @@ class F1Net(nn.Module):
 
     def forward(self, xy: torch.Tensor) -> torch.Tensor:
         # xy: [N, 2] in [-1, 1]
-        return self.mlp(xy)
+        if self.xy_harmonics > 0 or not self.xy_include_input:
+            feat = encode_xy(xy, K=self.xy_harmonics, include_input=self.xy_include_input)
+        else:
+            feat = xy
+        return self.mlp(feat)
 
 
 class F2Net(nn.Module):
@@ -74,14 +87,19 @@ class F1F2Model(nn.Module):
                  f2_layers: int = 4,
                  time_feat_dim: int = 4,
                  omega0_first: float = 30.0,
-                 omega0_hidden: float = 30.0):
+                 omega0_hidden: float = 30.0,
+                 xy_harmonics: int = 0,
+                 xy_include_input: bool = True):
         super().__init__()
         # F1: 坐标 -> latent
-        self.f1 = F1Net(latent_dim, f1_hidden, f1_layers, omega0_first, omega0_hidden)
+        self.f1 = F1Net(latent_dim, f1_hidden, f1_layers, omega0_first, omega0_hidden,
+                        xy_harmonics=xy_harmonics, xy_include_input=xy_include_input)
         # F2: (latent + time) -> rgb
         self.f2 = F2Net(latent_dim + time_feat_dim, f2_hidden, f2_layers, omega0_first, omega0_hidden)
         self.latent_dim = latent_dim
         self.time_feat_dim = time_feat_dim
+        self.xy_harmonics = xy_harmonics
+        self.xy_include_input = xy_include_input
 
     def forward(self, xy: torch.Tensor, t_feat: torch.Tensor):
         # xy: [N, 2], t_feat: [N, time_feat_dim]

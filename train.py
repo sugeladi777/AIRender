@@ -36,6 +36,9 @@ def parse_args():
     p.add_argument('--layers_f2', type=int, default=4, help='F2 的 SIREN 层数')
 
     p.add_argument('--time_harmonics', type=int, default=2, help='时间 Fourier 编码的频率 K（time feature 维度 = 2*K）')
+    # 新增：XY 位置编码（Fourier 特征）
+    p.add_argument('--xy_harmonics', type=int, default=0, help='坐标 (x,y) 的 Fourier 编码频率 K_xy；0 表示不使用')
+    p.add_argument('--xy_include_input', action='store_true', help='在 XY 编码中是否包含原始 (x,y) 输入（默认不包含，开启后拼接原始坐标）')
 
     p.add_argument('--samples_per_epoch', type=int, default=None,
                    help='每个 epoch 随机采样的样本数；默认 = 全部像素×帧数（可能很大），可指定较小值以加速调试')
@@ -100,6 +103,8 @@ def main():
         f2_hidden=args.hidden_f2,
         f2_layers=args.layers_f2,
         time_feat_dim=time_feat_dim,
+        xy_harmonics=args.xy_harmonics,
+        xy_include_input=args.xy_include_input,
     ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)

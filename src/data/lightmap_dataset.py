@@ -7,7 +7,7 @@ from PIL import Image
 import torch
 from torch.utils.data import Dataset
 
-from ..utils.time_encoding import encode_time
+from ..utils.encoding import encode_time
 
 
 def _load_images(image_dir: str) -> np.ndarray:

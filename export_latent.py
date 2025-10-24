@@ -27,6 +27,8 @@ def main():
     cfg = ckpt['config']
     H, W = ckpt['image_size']
     time_feat_dim = ckpt.get('time_feat_dim', 2 * cfg.get('time_harmonics', 2))
+    xy_harmonics = cfg.get('xy_harmonics', 0)
+    xy_include_input = cfg.get('xy_include_input', True)
 
     # 重建模型结构并加载权重
     model = F1F2Model(
@@ -36,6 +38,8 @@ def main():
         f2_hidden=cfg['hidden_f2'],
         f2_layers=cfg['layers_f2'],
         time_feat_dim=time_feat_dim,
+        xy_harmonics=xy_harmonics,
+        xy_include_input=xy_include_input,
     ).to(device)
     model.load_state_dict(ckpt['model'])
     model.eval()
