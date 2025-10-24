@@ -1,0 +1,23 @@
+name: AIRender
+channels:
+  - nvidia
+  - pytorch
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.11
+  - numpy
+  - pillow
+  - tqdm
+  - pip
+  - pip:
+    - -r pip_requirements.txt
+
+# Notes:
+# This environment delegates installation of torch and torchvision to pip using the
+# PyTorch cu130 index. The file `pip_requirements.txt` contains the index URL and the
+# package names so that `conda env create -f environment.yml` will install them via pip.
+# After creating the env, verify GPU support with:
+#   conda run -n AIRender python -c "import torch; print(torch.__version__); print('built with CUDA', getattr(torch.version, 'cuda', None)); print('cuda_available', torch.cuda.is_available()); print('device_count', torch.cuda.device_count())"
+

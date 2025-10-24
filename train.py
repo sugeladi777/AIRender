@@ -40,6 +40,7 @@ def parse_args():
     p.add_argument('--samples_per_epoch', type=int, default=None,
                    help='每个 epoch 随机采样的样本数；默认 = 全部像素×帧数（可能很大），可指定较小值以加速调试')
     p.add_argument('--num_workers', type=int, default=0, help='DataLoader 的子进程数（Windows 推荐 0 或 1）')
+    p.add_argument('--amp', action='store_true', help='启用混合精度训练（自动混合精度，CUDA 下加速并节省显存）')
     p.add_argument('--seed', type=int, default=42, help='随机种子，用于复现')
 
     p.add_argument('--save_every', type=int, default=10, help='每隔多少个 epoch 保存一次检查点')
@@ -65,6 +66,10 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
+    # 如果使用 CUDA，启用 cudnn 的 benchmark（当输入尺寸稳定时可加速卷积等操作）
+    if device.type == 'cuda':
+        torch.backends.cudnn.benchmark = True
+
     # 数据集与 DataLoader
     dataset = LightMapTimeDataset(
         image_dir=args.data_dir,
@@ -75,8 +80,16 @@ def main():
     )
     H, W = dataset.size
 
-    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True,
-                        num_workers=args.num_workers, pin_memory=(device.type == 'cuda'))
+    # 使用 persistent_workers 与 prefetch_factor 提升多进程 DataLoader 的性能（num_workers > 0 时）
+    loader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=(device.type == 'cuda'),
+        persistent_workers=(args.num_workers > 0),
+        prefetch_factor=2,
+    )
 
     time_feat_dim = 2 * args.time_harmonics
 
@@ -93,6 +106,17 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     criterion = nn.MSELoss()
 
+    # 混合精度（仅在 CUDA 且用户传入 --amp 时启用）
+    use_amp = args.amp and (device.type == 'cuda')
+    # 新版 PyTorch 推荐使用 torch.amp.GradScaler('cuda')；为兼容不同版本，优先尝试新 API，失败时回退到旧 API
+    if use_amp:
+        try:
+            scaler = torch.amp.GradScaler('cuda')
+        except Exception:
+            scaler = torch.cuda.amp.GradScaler()
+    else:
+        scaler = None
+
     best_loss: Optional[float] = None
 
     for epoch in range(1, args.epochs + 1):
@@ -101,17 +125,28 @@ def main():
         running_loss = 0.0
         count = 0
         for xy, t_feat, rgb in pbar:
-            # 将数据移动到 device
-            xy = xy.to(device)
-            t_feat = t_feat.to(device)
-            rgb = rgb.to(device)
+            # 将数据移动到 device，若使用 pin_memory 可使用 non_blocking 加速拷贝
+            non_block = True if device.type == 'cuda' else False
+            xy = xy.to(device, non_blocking=non_block)
+            t_feat = t_feat.to(device, non_blocking=non_block)
+            rgb = rgb.to(device, non_blocking=non_block)
 
-            pred, _ = model(xy, t_feat)
-            loss = criterion(pred, rgb)
+            if use_amp:
+                with torch.cuda.amp.autocast():
+                    pred, _ = model(xy, t_feat)
+                    loss = criterion(pred, rgb)
 
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                pred, _ = model(xy, t_feat)
+                loss = criterion(pred, rgb)
+
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                optimizer.step()
 
             bs = xy.shape[0]
             running_loss += loss.item() * bs
