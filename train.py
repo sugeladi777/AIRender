@@ -22,20 +22,20 @@ def parse_args():
     p.add_argument('--data_dir', type=str, required=True, help='包含 24 张图的文件夹，按字典序对应 t=0..23')
     p.add_argument('--out_dir', type=str, required=True, help='训练输出目录，用于保存检查点与导出结果')
 
-    p.add_argument('--epochs', type=int, default=200, help='训练轮数（epoch）')
+    p.add_argument('--epochs', type=int, default=10, help='训练轮数（epoch）')
     p.add_argument('--batch_size', type=int, default=65536, help='每个 batch 的样本数；CPU 上请使用较小值（如 1024–4096）')
-    p.add_argument('--lr', type=float, default=1e-3, help='学习率（Adam 默认）')
+    p.add_argument('--lr', type=float, default=5e-4, help='学习率（Adam 默认）')
 
     # 模型结构参数，已与 compressor 默认值对齐
-    p.add_argument('--latent_dim', type=int, default=32, help='潜变量维度 z 的大小（latent map 每像素向量长度）')
-    p.add_argument('--hidden_f1', type=int, default=32, help='F1 隐藏层宽度（SIREN 隐藏单元数）')
-    p.add_argument('--layers_f1', type=int, default=4, help='F1 的 SIREN 层数')
+    p.add_argument('--latent_dim', type=int, default=64, help='潜变量维度 z 的大小（latent map 每像素向量长度）')
+    p.add_argument('--hidden_f1', type=int, default=64, help='F1 隐藏层宽度（SIREN 隐藏单元数）')
+    p.add_argument('--layers_f1', type=int, default=6, help='F1 的 SIREN 层数')
     p.add_argument('--hidden_f2', type=int, default=64, help='F2 隐藏层宽度（SIREN 隐藏单元数）')
-    p.add_argument('--layers_f2', type=int, default=4, help='F2 的 SIREN 层数')
+    p.add_argument('--layers_f2', type=int, default=6, help='F2 的 SIREN 层数')
 
-    p.add_argument('--time_harmonics', type=int, default=2, help='时间 Fourier 编码的频率 K（time feature 维度 = 2*K）')
+    p.add_argument('--time_harmonics', type=int, default=4, help='时间 Fourier 编码的频率 K（time feature 维度 = 2*K）')
     # 新增：XY 位置编码（Fourier 特征）
-    p.add_argument('--xy_harmonics', type=int, default=0, help='坐标 (x,y) 的 Fourier 编码频率 K_xy；0 表示不使用')
+    p.add_argument('--xy_harmonics', type=int, default=4, help='坐标 (x,y) 的 Fourier 编码频率 K_xy；0 表示不使用')
     p.add_argument('--xy_include_input', action='store_true', help='在 XY 编码中是否包含原始 (x,y) 输入（默认不包含，开启后拼接原始坐标）')
 
     # 优化器与学习率策略
@@ -116,8 +116,7 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     # 使用 ReduceLROnPlateau 来根据训练损失自适应降低学习率
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=args.scheduler_factor, patience=args.scheduler_patience, min_lr=args.min_lr, verbose=True
-    )
+        optimizer, mode='min', factor=args.scheduler_factor, patience=args.scheduler_patience, min_lr=args.min_lr)
     criterion = nn.MSELoss()
 
     best_loss: Optional[float] = None

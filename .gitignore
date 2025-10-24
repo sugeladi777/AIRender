@@ -1,6 +1,7 @@
 /dataset/
 /out/
 /runs/
+command.md
 
 # --- Python / tooling ignores ---
 # Byte-compiled / optimized / DLL files
