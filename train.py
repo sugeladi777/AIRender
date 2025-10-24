@@ -1,6 +1,4 @@
 from __future__ import annotations
-import os
-import json
 import argparse
 from pathlib import Path
 from typing import Optional
@@ -39,6 +37,12 @@ def parse_args():
     # 新增：XY 位置编码（Fourier 特征）
     p.add_argument('--xy_harmonics', type=int, default=0, help='坐标 (x,y) 的 Fourier 编码频率 K_xy；0 表示不使用')
     p.add_argument('--xy_include_input', action='store_true', help='在 XY 编码中是否包含原始 (x,y) 输入（默认不包含，开启后拼接原始坐标）')
+
+    # 优化器与学习率策略
+    p.add_argument('--weight_decay', type=float, default=1e-5, help='AdamW 权重衰减（weight decay）')
+    p.add_argument('--scheduler_patience', type=int, default=5, help='ReduceLROnPlateau 的 patience（以 epoch 为单位）')
+    p.add_argument('--scheduler_factor', type=float, default=0.5, help='ReduceLROnPlateau 的 factor（乘法因子）')
+    p.add_argument('--min_lr', type=float, default=1e-6, help='学习率下限，scheduler 不会降到更低')
 
     p.add_argument('--samples_per_epoch', type=int, default=None,
                    help='每个 epoch 随机采样的样本数；默认 = 全部像素×帧数（可能很大），可指定较小值以加速调试')
@@ -107,11 +111,13 @@ def main():
         xy_include_input=args.xy_include_input,
     ).to(device)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    # 使用 AdamW 并启用 weight decay
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    # 使用 ReduceLROnPlateau 来根据训练损失自适应降低学习率
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=args.scheduler_factor, patience=args.scheduler_patience, min_lr=args.min_lr, verbose=True
+    )
     criterion = nn.MSELoss()
-
-    # 不使用混合精度（AMP）——保持数值稳定性，使用标准训练流程
-    scaler = None
 
     best_loss: Optional[float] = None
 
@@ -140,6 +146,17 @@ def main():
             pbar.set_postfix(loss=running_loss / count)
 
         epoch_loss = running_loss / max(1, count)
+
+        # 使用 ReduceLROnPlateau 调整学习率（以训练损失为监控指标）
+        try:
+            scheduler.step(epoch_loss)
+        except Exception:
+            # 如果 scheduler 未定义或出错，则跳过（保持向后兼容）
+            pass
+
+        # 打印当前学习率
+        current_lr = optimizer.param_groups[0].get('lr', args.lr)
+        print(f"Epoch {epoch} lr={current_lr:.6g}")
 
         # 周期性保存检查点
         if (epoch % args.save_every == 0) or (epoch == args.epochs):
