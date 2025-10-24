@@ -43,6 +43,7 @@ def parse_args():
     p.add_argument('--scheduler_patience', type=int, default=5, help='ReduceLROnPlateau 的 patience（以 epoch 为单位）')
     p.add_argument('--scheduler_factor', type=float, default=0.5, help='ReduceLROnPlateau 的 factor（乘法因子）')
     p.add_argument('--min_lr', type=float, default=1e-6, help='学习率下限，scheduler 不会降到更低')
+    p.add_argument('--clip_grad', type=float, default=0.0, help='梯度裁剪阈值 (L2 norm)，<=0 则不裁剪')
 
     p.add_argument('--samples_per_epoch', type=int, default=None,
                    help='每个 epoch 随机采样的样本数；默认 = 全部像素×帧数（可能很大），可指定较小值以加速调试')
@@ -138,6 +139,11 @@ def main():
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
+
+            # 梯度裁剪（若用户设置了 clip_grad > 0）
+            if args.clip_grad is not None and args.clip_grad > 0.0:
+                nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
+
             optimizer.step()
 
             bs = xy.shape[0]
