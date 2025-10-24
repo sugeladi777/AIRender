@@ -40,7 +40,6 @@ def parse_args():
     p.add_argument('--samples_per_epoch', type=int, default=None,
                    help='每个 epoch 随机采样的样本数；默认 = 全部像素×帧数（可能很大），可指定较小值以加速调试')
     p.add_argument('--num_workers', type=int, default=0, help='DataLoader 的子进程数（Windows 推荐 0 或 1）')
-    p.add_argument('--amp', action='store_true', help='启用混合精度训练（自动混合精度，CUDA 下加速并节省显存）')
     p.add_argument('--seed', type=int, default=42, help='随机种子，用于复现')
 
     p.add_argument('--save_every', type=int, default=10, help='每隔多少个 epoch 保存一次检查点')
@@ -106,16 +105,8 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     criterion = nn.MSELoss()
 
-    # 混合精度（仅在 CUDA 且用户传入 --amp 时启用）
-    use_amp = args.amp and (device.type == 'cuda')
-    # 新版 PyTorch 推荐使用 torch.amp.GradScaler('cuda')；为兼容不同版本，优先尝试新 API，失败时回退到旧 API
-    if use_amp:
-        try:
-            scaler = torch.amp.GradScaler('cuda')
-        except Exception:
-            scaler = torch.cuda.amp.GradScaler()
-    else:
-        scaler = None
+    # 不使用混合精度（AMP）——保持数值稳定性，使用标准训练流程
+    scaler = None
 
     best_loss: Optional[float] = None
 
@@ -131,22 +122,12 @@ def main():
             t_feat = t_feat.to(device, non_blocking=non_block)
             rgb = rgb.to(device, non_blocking=non_block)
 
-            if use_amp:
-                with torch.cuda.amp.autocast():
-                    pred, _ = model(xy, t_feat)
-                    loss = criterion(pred, rgb)
+            pred, _ = model(xy, t_feat)
+            loss = criterion(pred, rgb)
 
-                optimizer.zero_grad(set_to_none=True)
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                pred, _ = model(xy, t_feat)
-                loss = criterion(pred, rgb)
-
-                optimizer.zero_grad(set_to_none=True)
-                loss.backward()
-                optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
 
             bs = xy.shape[0]
             running_loss += loss.item() * bs
