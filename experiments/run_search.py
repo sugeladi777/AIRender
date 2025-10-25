@@ -45,7 +45,9 @@ def build_cmd(config, data_dir, out_dir_base, num_workers=None):
     # Ensure we export latent_map and F2 (needed for evaluation)
     if '--compute_latent' not in cmd:
         cmd.append('--compute_latent')
-
+    if '--num_workers' not in cmd and num_workers is not None:
+        cmd.append('--num_workers')
+        cmd.append(str(num_workers))
     return cmd, run_out
 
 
