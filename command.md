@@ -9,10 +9,10 @@
 ## 导出
 
 ## 使用checkpoint来推理渲染
-`python infer.py --ckpt D:\Project\AIRender\runs\tod_4060\best.ckpt --time 12 --out  D:\Project\AIRender\out\recon_12.png`
+`python infer.py --ckpt D:\Project\AIRender\runs\experiments\baseline_20251025_015021\best.ckpt --time 12 --out  D:\Project\AIRender\out\recon_12.png`
 
 ## 使用导出的中间表示来推理渲染
 `python infer.py --latent_path D:\Project\AIRender\runs\tod_cpu\latent_map.npy --f2_path D:\Project\AIRender\runs\tod_cpu\f2_state_dict.pt --time 18 --out D:\Project\AIRender\out\recon_18.png`
 
 ## 进行网络结构实验
-`python -m experiments/run_search.py --space experiments/space.json --data_dir D:\Project\AIRender\dataset\tod_output --out_base runs/experiments`
+`python -m experiments.run_search --space experiments/space.json --data_dir D:\Project\AIRender\dataset\tod_output --out_base runs/experiments`

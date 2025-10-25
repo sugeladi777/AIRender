@@ -1,112 +1,128 @@
-# 基于 SIREN 的24小时光照贴图压缩
-
-本项目实现一种两阶段神经压缩：
-- F1: 将像素坐标 `(x,y)` 映射为中间变量（潜变量 `z`）。
-- F2: 接收 `(z, t)`，输出像素 `rgb`，其中 `t` 是时间（一天24帧）。
-
-训练完成后，可导出一张“潜变量贴图（latent map）”和 F2 的模型参数，实现用一张中间变量贴图 + 一个小模型重建全天光照。
-
-## 目录结构
-
-- `src/models/siren.py`：SIREN 层与 MLP 实现。
-- `src/models/compressor.py`：F1/F2/组合模型定义。
-- `src/data/lightmap_dataset.py`：24帧光照贴图数据集加载与采样。
-- `src/utils/time_encoding.py`：时间编码（Fourier sin/cos）。
-- `train.py`：训练脚本，支持导出潜变量贴图与权重。
-- `export_latent.py`：从检查点导出潜变量贴图与 F2 模型（含 TorchScript）。
-- `infer.py`：用导出的潜变量贴图 + F2 重建任意时刻图像。
-
-## 环境准备（Windows, cmd）
-
-建议使用 Python 3.10+/CUDA 环境。
 # AIRender — 基于 SIREN 的 24 小时光照贴图压缩与重建
 
-一个轻量级的两阶段神经表示（neural representation）项目：
+本仓库实现一种两阶段神经表示（coordinate-based / SIREN）：
 
-- F1（坐标到潜变量）：把像素坐标 (x,y) 映射到每像素的潜变量向量 z；
-- F2（潜变量+时间到颜色）：把 z 与时间特征拼接后输出 RGB，能在任意时刻重建光照贴图。
+- F1：把像素坐标 (x,y) 映射为每像素的潜变量向量 z（latent map）；
+- F2：把 z 与时间特征 t 拼接后输出 RGB，用以重建任意时刻的光照贴图（24 帧/日）。
 
-目标是使用一张 `latent_map.npy`（形状为 H×W×latent_dim）加上一个小型的 F2 模型，来表达并实时重建全天 24 小时的光照变化，从而大幅减少存储与部署成本。
+训练后可导出一张 `latent_map.npy`（H×W×latent_dim）和小型的 F2 模型（`f2_state_dict.pt` / `f2_ts.pt`），用于轻量部署。
 
-## 项目结构（主要文件）
+## 主要文件说明
 
-- `train.py`：训练脚本（支持在训练结束后导出 latent 与 F2）。
-- `export_latent.py`：从 checkpoint 导出 `latent_map.npy`、`f2_state_dict.pt` 和 `f2_ts.pt`（TorchScript）。
-- `infer.py`：使用 `latent_map.npy` + `f2_state_dict.pt` 或直接使用 `.ckpt` 渲染任意时刻的图像。
-- `src/models/siren.py`：SIREN（sin 激活）相关实现。
-- `src/models/compressor.py`：F1/F2/组合模型与 `compute_latent_map` 实现。
-- `src/data/lightmap_dataset.py`：加载 24 帧光照图并返回训练样本。
-- `src/utils/time_encoding.py`：时间 Fourier 编码（sin/cos）。
+- `train.py`：训练脚本，支持 `--compute_latent` 在训练结束后导出 `latent_map.npy` / `f2_state_dict.pt` / `f2_ts.pt`。
+- `export_latent.py`：从 checkpoint 单独导出 latent 与 F2（若训练时未导出）。
+- `infer.py`：使用 checkpoint 或导出的 latent+F2 进行渲染。
+- `experiments/run_search.py`：简单的实验网格搜索与评估（已支持按 PSNR/SSIM/LPIPS 排序结果）。
+- `src/models/compressor.py`：F1/F2/组合模型与 `compute_latent_map`。
+- `src/data/lightmap_dataset.py`：加载 24 帧数据并提供训练样本接口。
 
-## 从零到完成：一步步操作（Windows, cmd.exe）
+## 环境与依赖
 
-### 1) 准备环境
+我已把主要依赖整合到 `environment.yml`（conda）和 `pip_requirements.txt`（用于 PyTorch wheel 指定）。推荐在 Windows 上使用 conda 创建环境：
+# AIRender — 基于 SIREN 的 24 小时光照贴图压缩与重建
 
-推荐使用 Python 3.11。先创建并激活虚拟环境：
+简明说明
+------------
+
+本仓库实现一种两阶段神经表示（coordinate-based / SIREN）：
+
+- F1：把像素坐标 (x,y) 映射为每像素的潜变量向量 z（latent map）。
+- F2：把 z 与时间特征 t 拼接后输出 RGB，用以重建任意时刻的光照贴图（24 帧/日）。
+
+训练后可导出一张 `latent_map.npy`（H×W×latent_dim）和小型的 F2 模型（`f2_state_dict.pt` / `f2_ts.pt`），用于轻量部署。
+
+主要文件
+-----------
+
+- `train.py`：训练脚本，支持 `--compute_latent` 在训练结束后导出 `latent_map.npy` / `f2_state_dict.pt` / `f2_ts.pt`。
+- `export_latent.py`：从 checkpoint 单独导出 latent 与 F2（若训练时未导出）。
+- `infer.py`：使用 checkpoint 或导出的 latent+F2 进行渲染。
+- `experiments/run_search.py`：简单的实验网格搜索与评估（会生成 `results.csv` 与 `results_sorted.csv`，包含 PSNR/SSIM/LPIPS）。
+- `src/models/compressor.py`：F1/F2/组合模型与 `compute_latent_map`。
+- `src/data/lightmap_dataset.py`：加载 24 帧数据并提供训练样本接口。
+
+环境与依赖（建议）
+------------------
+
+主要依赖已整理在 `environment.yml`（conda）与 `pip_requirements.txt`（PyTorch wheel 指定）。推荐：
 
 ```cmd
-conda create -n AIRender python=3.11
-pip install -r requirements.txt
+conda env create -f environment.yml
+conda activate AIRender
 ```
 
-### 2) 准备数据
+可选（用于完整评估指标）：
 
-把 24 张同尺寸的光照贴图放到一个文件夹，例如：
+```cmd
+pip install scikit-image lpips
+```
+
+- `scikit-image`：用于计算 SSIM（缺失时会跳过 SSIM）。
+- `lpips`：用于计算 LPIPS（缺失时会跳过 LPIPS）。
+
+快速开始（示例命令，Windows cmd.exe）
+---------------------------------
+
+准备数据：把 24 张同尺寸图像放在一个文件夹（按字典序对应 t=0..23），例如：
 
 ```
 D:\Project\AIRender\dataset\tod_output
 ```
 
-文件支持 `.png/.jpg/.jpeg`；按字典序排序后对应 t=0..23（如果不是 24 张，代码会给出警告但仍按排序进行索引）。
+CPU 小规模调试：
 
-### 3) 训练（示例）
-
-快速 CPU 调试（小规模）：
 ```cmd
 python train.py --data_dir D:\Project\AIRender\dataset\tod_output --out_dir D:\Project\AIRender\runs\tod_cpu \
   --epochs 5 --batch_size 4096 --latent_dim 16 --hidden_f1 16 --hidden_f2 32 \
   --time_harmonics 2 --lr 1e-3 --num_workers 0 --samples_per_epoch 200000 --compute_latent
 ```
 
-常规 GPU 训练（如果有 CUDA 且显存充足）：
+GPU 示例（显存充足时）：
+
 ```cmd
 python train.py --data_dir D:\Project\AIRender\dataset\tod_output --out_dir D:\Project\AIRender\runs\tod_gpu \
   --epochs 200 --batch_size 65536 --latent_dim 32 --hidden_f1 32 --hidden_f2 64 \
-  --time_harmonics 2 --lr 1e-3 --num_workers 0 --compute_latent
+  --time_harmonics 4 --lr 5e-4 --num_workers 8 --compute_latent
 ```
 
-说明：
-- `--compute_latent`：训练结束后自动计算并保存 `latent_map.npy`、`f2_state_dict.pt` 和 `f2_ts.pt` 到 `--out_dir`。
-- 如遇 OOM（显存不足），请将 `--batch_size`、`--latent_dim` 或隐藏单元数调小，或降低 `--samples_per_epoch`。
-
-训练输出（`--out_dir`）通常包含：
-- `best.ckpt`, `last.ckpt`（检查点）
-- `latent_map.npy`（若使用 `--compute_latent` 或通过 `export_latent.py` 导出）
-- `f2_state_dict.pt`, `f2_ts.pt`
-
-### 4) 从 checkpoint 导出 latent_map（可选）
-
-如果你没有在训练时开启 `--compute_latent`，可以用 `export_latent.py` 单独导出：
+从 checkpoint 导出 latent（若训练时未导出）：
 
 ```cmd
 python export_latent.py --ckpt D:\Project\AIRender\runs\tod_cpu\best.ckpt --out_dir D:\Project\AIRender\exports\tod_cpu
 ```
 
-导出后 `out_dir` 下会包含：
-- `latent_map.npy`（H×W×latent_dim）
-- `f2_state_dict.pt`（PyTorch state_dict）
-- `f2_ts.pt`（TorchScript，可直接部署）
-
-### 5) 推理 / 重建（示例）
-
-直接用 checkpoint（一键计算 latent 并渲染）：
+推理（使用 checkpoint）：
 
 ```cmd
 python infer.py --ckpt D:\Project\AIRender\runs\tod_cpu\best.ckpt --time 12 --out D:\Project\AIRender\out\recon_12.png
 ```
 
-使用已导出的 `latent_map.npy` + `f2_state_dict.pt`（更快、适合部署）：
+推理（使用导出 latent + F2）：
 
 ```cmd
 python infer.py --latent_path D:\Project\AIRender\exports\tod_cpu\latent_map.npy --f2_path D:\Project\AIRender\exports\tod_cpu\f2_state_dict.pt --time 18 --out D:\Project\AIRender\out\recon_18.png
 ```
+
+运行实验（网格搜索）
+--------------------
+
+仓库包含 `experiments/run_search.py`：根据 `experiments/space.json` 顺序逐项运行训练并评估（每个实验目录会包含训练输出及导出文件）。
+
+推荐以模块方式运行（防止 `ModuleNotFoundError: No module named 'src'`）：
+
+```cmd
+python -m experiments.run_search --space experiments/space.json --data_dir D:\Project\AIRender\dataset\tod_output --out_base runs/experiments
+```
+
+要点：
+
+- `run_search` 会强制在调用 `train.py` 时添加 `--compute_latent`，以便导出 `latent_map.npy` 与 `f2_ts.pt` 供评估使用；
+- 汇总文件：`runs/experiments/results.csv`（包含 `psnr_mean, ssim_mean, lpips_mean` 字段）与 `runs/experiments/results_sorted.csv`（按 PSNR 降序、SSIM 降序、LPIPS 升序排序）。
+
+
+评估指标与可选依赖
+-------------------
+
+- PSNR：始终计算（NumPy 实现）。
+- SSIM：如安装 `scikit-image` 则计算，否则跳过。
+- LPIPS：如安装 `lpips` 则计算，否则跳过。
