@@ -1,21 +1,4 @@
 #!/usr/bin/env python3
-"""
-Simple experiment runner for AIRender `train.py`.
-
-Usage:
-  python experiments/run_search.py --space experiments/space.json --data_dir <path/to/data> --out_base runs/experiments
-
-What it does:
- - Reads a JSON list of experiment configurations (see experiments/space.json)
- - For each config it creates a unique output directory and runs `python train.py` with those args
- - Captures stdout/stderr to a log file and extracts the last reported `loss=` value as `final_loss`
- - Writes summary `results.csv` in the out_base directory
-
-Notes:
- - This runner is intentionally simple and sequential (no parallelism). You can run multiple instances in parallel
-   if you have multiple GPUs and adjust the commands accordingly.
- - The script expects to be run from repository root. Adjust paths if needed.
-"""
 import argparse
 import csv
 import json
@@ -36,7 +19,7 @@ from src.data.lightmap_dataset import LightMapTimeDataset
 from src.utils.encoding import encode_time
 
 
-def build_cmd(config, data_dir, out_dir_base):
+def build_cmd(config, data_dir, out_dir_base, num_workers=None):
     out_name = config.get('name') or f"exp_{int(time.time())}"
     run_out = os.path.join(out_dir_base, out_name + '_' + datetime.now().strftime('%Y%m%d_%H%M%S'))
     os.makedirs(run_out, exist_ok=True)
@@ -299,6 +282,9 @@ def main():
     parser.add_argument('--data_dir', type=str, required=True, help='Path to dataset')
     parser.add_argument('--out_base', type=str, default='runs/experiments', help='Base output dir for experiments')
     parser.add_argument('--space_id', type=int, default=None, help='If set, only run that index in the space (0-based)')
+    parser.add_argument('--gpus', type=int, default=1, help='Number of GPUs to run in parallel (uses CUDA_VISIBLE_DEVICES)')
+    parser.add_argument('--gpu_ids', type=str, default=None, help='Comma-separated GPU ids to use (overrides --gpus)')
+    parser.add_argument('--num_workers', type=int, default=None, help='Override DataLoader num_workers for all runs (overrides space.json)')
     args = parser.parse_args()
 
     os.makedirs(args.out_base, exist_ok=True)
@@ -318,33 +304,91 @@ def main():
         if os.path.getsize(results_csv) == 0:
             writer.writeheader()
 
+        # Prepare GPU list for parallel runs
+        gpu_list = []
+        if args.gpu_ids:
+            try:
+                gpu_list = [int(x) for x in args.gpu_ids.split(',') if x.strip() != '']
+            except Exception:
+                gpu_list = []
+        else:
+            if torch.cuda.is_available():
+                avail = torch.cuda.device_count()
+                take = min(args.gpus, avail) if args.gpus > 0 else 1
+                gpu_list = list(range(take))
+            else:
+                gpu_list = []
+
+        max_concurrent = len(gpu_list) if len(gpu_list) > 0 else 1
+        print(f"Running experiments using up to {max_concurrent} concurrent GPU workers: {gpu_list if gpu_list else 'CPU only'}")
+
+        running = []  # list of dicts: {proc, log_fh, run_out, start, idx, cfg, gpu}
+
+        def spawn_experiment(cmd, run_out, gpu_assigned, idx, cfg):
+            log_path = os.path.join(run_out, 'run.log')
+            os.makedirs(run_out, exist_ok=True)
+            env = os.environ.copy()
+            # set CUDA_VISIBLE_DEVICES if GPU assigned
+            if gpu_assigned is not None:
+                env['CUDA_VISIBLE_DEVICES'] = str(gpu_assigned)
+            # reduce parallel OpenMP threads to avoid oversubscription
+            env.setdefault('OMP_NUM_THREADS', '1')
+            fh = open(log_path, 'w', encoding='utf-8')
+            print('Spawning:', ' '.join(shlex.quote(x) for x in cmd), f'on GPU {gpu_assigned}')
+            proc = subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT, cwd=os.getcwd(), env=env)
+            return {'proc': proc, 'log_fh': fh, 'run_out': run_out, 'start': time.time(), 'idx': idx, 'cfg': cfg, 'log_path': log_path, 'gpu': gpu_assigned}
+
+        next_gpu_idx = 0
         for idx, cfg in enumerate(space):
             try:
-                cmd, run_out = build_cmd(cfg, args.data_dir, args.out_base)
-                rc, duration, final_loss, log_path = run_experiment(cmd, run_out)
-                # evaluate metrics (PSNR/SSIM/LPIPS)
-                try:
-                    psnr_mean, ssim_mean, lpips_mean = evaluate_run(run_out, args.data_dir)
-                except Exception as e:
-                    print('Evaluation failed:', e)
-                    psnr_mean, ssim_mean, lpips_mean = None, None, None
+                cmd, run_out = build_cmd(cfg, args.data_dir, args.out_base, num_workers=args.num_workers if hasattr(args, 'num_workers') else None)
 
-                writer.writerow({
-                    'id': idx,
-                    'name': cfg.get('name'),
-                    'run_out': run_out,
-                    'returncode': rc,
-                    'duration_s': f'{duration:.1f}',
-                    'final_loss': final_loss if final_loss is not None else '',
-                    'psnr_mean': f'{psnr_mean:.4f}' if psnr_mean is not None else '',
-                    'ssim_mean': f'{ssim_mean:.4f}' if ssim_mean is not None else '',
-                    'lpips_mean': f'{lpips_mean:.6f}' if lpips_mean is not None else '',
-                    'config_json': json.dumps(cfg, ensure_ascii=False),
-                    'log_path': log_path,
-                })
-                csvfile.flush()
+                # wait for a free slot if needed
+                while len(running) >= max_concurrent:
+                    time.sleep(2)
+                    # poll running procs
+                    for r in running[:]:
+                        ret = r['proc'].poll()
+                        if ret is not None:
+                            # finished
+                            r['log_fh'].close()
+                            duration = time.time() - r['start']
+                            final_loss = extract_final_loss(r['log_path'])
+                            rc = r['proc'].returncode
+                            # evaluate
+                            try:
+                                psnr_mean, ssim_mean, lpips_mean = evaluate_run(r['run_out'], args.data_dir)
+                            except Exception as e:
+                                print('Evaluation failed:', e)
+                                psnr_mean, ssim_mean, lpips_mean = None, None, None
+
+                            writer.writerow({
+                                'id': r['idx'],
+                                'name': r['cfg'].get('name'),
+                                'run_out': r['run_out'],
+                                'returncode': rc,
+                                'duration_s': f'{duration:.1f}',
+                                'final_loss': final_loss if final_loss is not None else '',
+                                'psnr_mean': f'{psnr_mean:.4f}' if psnr_mean is not None else '',
+                                'ssim_mean': f'{ssim_mean:.4f}' if ssim_mean is not None else '',
+                                'lpips_mean': f'{lpips_mean:.6f}' if lpips_mean is not None else '',
+                                'config_json': json.dumps(r['cfg'], ensure_ascii=False),
+                                'log_path': r['log_path'],
+                            })
+                            csvfile.flush()
+                            running.remove(r)
+
+                # assign GPU id (round-robin) or None
+                gpu_assigned = None
+                if len(gpu_list) > 0:
+                    gpu_assigned = gpu_list[next_gpu_idx % len(gpu_list)]
+                    next_gpu_idx += 1
+
+                job = spawn_experiment(cmd, run_out, gpu_assigned, idx, cfg)
+                running.append(job)
+
             except Exception as e:
-                print('Experiment failed', e)
+                print('Experiment failed to start', e)
                 writer.writerow({
                     'id': idx,
                     'name': cfg.get('name'),
@@ -355,6 +399,38 @@ def main():
                     'config_json': json.dumps(cfg, ensure_ascii=False),
                     'log_path': '',
                 })
+
+        # wait for remaining running jobs
+        while len(running) > 0:
+            time.sleep(2)
+            for r in running[:]:
+                ret = r['proc'].poll()
+                if ret is not None:
+                    r['log_fh'].close()
+                    duration = time.time() - r['start']
+                    final_loss = extract_final_loss(r['log_path'])
+                    rc = r['proc'].returncode
+                    try:
+                        psnr_mean, ssim_mean, lpips_mean = evaluate_run(r['run_out'], args.data_dir)
+                    except Exception as e:
+                        print('Evaluation failed:', e)
+                        psnr_mean, ssim_mean, lpips_mean = None, None, None
+
+                    writer.writerow({
+                        'id': r['idx'],
+                        'name': r['cfg'].get('name'),
+                        'run_out': r['run_out'],
+                        'returncode': rc,
+                        'duration_s': f'{duration:.1f}',
+                        'final_loss': final_loss if final_loss is not None else '',
+                        'psnr_mean': f'{psnr_mean:.4f}' if psnr_mean is not None else '',
+                        'ssim_mean': f'{ssim_mean:.4f}' if ssim_mean is not None else '',
+                        'lpips_mean': f'{lpips_mean:.6f}' if lpips_mean is not None else '',
+                        'config_json': json.dumps(r['cfg'], ensure_ascii=False),
+                        'log_path': r['log_path'],
+                    })
+                    csvfile.flush()
+                    running.remove(r)
 
     print('Finished experiments. Results saved to', results_csv)
     # produce a sorted CSV according to PSNR(desc), SSIM(desc), LPIPS(asc)

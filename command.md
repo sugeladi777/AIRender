@@ -15,4 +15,4 @@
 `python infer.py --latent_path D:\Project\AIRender\runs\tod_cpu\latent_map.npy --f2_path D:\Project\AIRender\runs\tod_cpu\f2_state_dict.pt --time 18 --out D:\Project\AIRender\out\recon_18.png`
 
 ## 进行网络结构实验
-`python -m experiments.run_search --space experiments/space.json --data_dir D:\Project\AIRender\dataset\tod_output --out_base runs/experiments`
+`python -m experiments.run_search --gpus 4 --num_workers 7 --space experiments/space.json --data_dir D:\Project\AIRender\dataset\tod_output --out_base runs/experiments`
