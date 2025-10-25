@@ -13,3 +13,6 @@
 
 ## 使用导出的中间表示来推理渲染
 `python infer.py --latent_path D:\Project\AIRender\runs\tod_cpu\latent_map.npy --f2_path D:\Project\AIRender\runs\tod_cpu\f2_state_dict.pt --time 18 --out D:\Project\AIRender\out\recon_18.png`
+
+## 进行网络结构实验
+`python -m experiments/run_search.py --space experiments/space.json --data_dir D:\Project\AIRender\dataset\tod_output --out_base runs/experiments`
