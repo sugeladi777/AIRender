@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from src.data.lightmap_dataset import LightMapTimeDataset
-from src.models.compressor import F1F2Model
+from src.models.delta_field import DeltaField, DeltaFieldConfig
 
 
 def parse_args():
@@ -18,7 +18,7 @@ def parse_args():
 
     主要参数包含数据路径、输出路径、训练超参与模型结构超参。
     """
-    p = argparse.ArgumentParser(description='训练 F1+F2 SIREN 光照压缩模型（24 帧）')
+    p = argparse.ArgumentParser(description='训练 DeltaField：直接学习 f(x,y,t)->ΔRGB（以 baseline 为基准的残差）')
     p.add_argument('--data_dir', type=str, required=True, help='包含 24 张图的文件夹，按字典序对应 t=0..23')
     p.add_argument('--out_dir', type=str, required=True, help='训练输出目录，用于保存检查点与导出结果')
 
@@ -26,15 +26,12 @@ def parse_args():
     p.add_argument('--batch_size', type=int, default=65536, help='每个 batch 的样本数；CPU 上请使用较小值（如 1024–4096）')
     p.add_argument('--lr', type=float, default=5e-4, help='学习率（Adam 默认）')
 
-    # 模型结构参数，已与 compressor 默认值对齐
-    p.add_argument('--latent_dim', type=int, default=64, help='潜变量维度 z 的大小（latent map 每像素向量长度）')
-    p.add_argument('--hidden_f1', type=int, default=64, help='F1 隐藏层宽度（SIREN 隐藏单元数）')
-    p.add_argument('--layers_f1', type=int, default=6, help='F1 的 SIREN 层数')
-    p.add_argument('--hidden_f2', type=int, default=64, help='F2 隐藏层宽度（SIREN 隐藏单元数）')
-    p.add_argument('--layers_f2', type=int, default=6, help='F2 的 SIREN 层数')
+    # 模型结构参数
+    p.add_argument('--hidden', type=int, default=64, help='SIREN 隐藏层宽度')
+    p.add_argument('--layers', type=int, default=6, help='SIREN 隐藏层数量')
 
     p.add_argument('--time_harmonics', type=int, default=4, help='时间 Fourier 编码的频率 K（time feature 维度 = 2*K）')
-    # 新增：XY 位置编码（Fourier 特征）
+    # XY/Time 编码
     p.add_argument('--xy_harmonics', type=int, default=4, help='坐标 (x,y) 的 Fourier 编码频率 K_xy；0 表示不使用')
     p.add_argument('--xy_include_input', action='store_true', help='在 XY 编码中是否包含原始 (x,y) 输入（默认不包含，开启后拼接原始坐标）')
 
@@ -50,8 +47,11 @@ def parse_args():
     p.add_argument('--num_workers', type=int, default=0, help='DataLoader 的子进程数（Windows 推荐 0 或 1）')
     p.add_argument('--seed', type=int, default=42, help='随机种子，用于复现')
 
+    # 残差学习设置：以某一时刻图像为基准，学习时间变化的残差
+    p.add_argument('--residual_mode', type=bool, default=True, help='启用残差训练：目标为 rgb - baseline(t=baseline_time)，默认始终启用')
+    p.add_argument('--baseline_time', type=int, default=12, help='基准时间（整点小时），默认 12')
+
     p.add_argument('--save_every', type=int, default=10, help='每隔多少个 epoch 保存一次检查点')
-    p.add_argument('--compute_latent', action='store_true', help='训练结束后计算并保存 latent_map.npy 与 F2 权重')
 
     return p.parse_args()
 
@@ -69,7 +69,7 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 自动选择设备（可通过命令行在以后扩展为强制 CPU 或指定 cuda:0）
+    # 自动选择设备
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
@@ -84,8 +84,16 @@ def main():
         sample_mode='random' if args.samples_per_epoch is not None else 'all',
         samples_per_epoch=args.samples_per_epoch,
         seed=args.seed,
+        residual_mode=args.residual_mode,
+        baseline_time=args.baseline_time,
     )
     H, W = dataset.size
+
+    # 若为残差模式，保存基准图像以便后续推理时加回
+    if args.residual_mode:
+        base_img = (np.clip(dataset.baseline_image, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+        from PIL import Image
+        Image.fromarray(base_img).save(Path(args.out_dir) / 'baseline.png')
 
     # 使用 persistent_workers 与 prefetch_factor 提升多进程 DataLoader 的性能（num_workers > 0 时）
     loader = DataLoader(
@@ -98,19 +106,15 @@ def main():
         prefetch_factor=2,
     )
 
-    time_feat_dim = 2 * args.time_harmonics
-
-    # 构建模型并移动到目标设备
-    model = F1F2Model(
-        latent_dim=args.latent_dim,
-        f1_hidden=args.hidden_f1,
-        f1_layers=args.layers_f1,
-        f2_hidden=args.hidden_f2,
-        f2_layers=args.layers_f2,
-        time_feat_dim=time_feat_dim,
+    # 构建 DeltaField 模型
+    df_cfg = DeltaFieldConfig(
+        time_harmonics=args.time_harmonics,
         xy_harmonics=args.xy_harmonics,
         xy_include_input=args.xy_include_input,
-    ).to(device)
+        hidden=args.hidden,
+        layers=args.layers,
+    )
+    model = DeltaField(df_cfg).to(device)
 
     # 使用 AdamW 并启用 weight decay
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -133,7 +137,7 @@ def main():
             t_feat = t_feat.to(device, non_blocking=non_block)
             rgb = rgb.to(device, non_blocking=non_block)
 
-            pred, _ = model(xy, t_feat)
+            pred = model(xy, t_feat)
             loss = criterion(pred, rgb)
 
             optimizer.zero_grad(set_to_none=True)
@@ -171,7 +175,7 @@ def main():
                 'optimizer': optimizer.state_dict(),
                 'config': vars(args),
                 'image_size': (H, W),
-                'time_feat_dim': time_feat_dim,
+                'model_type': 'delta_field',
             }
             torch.save(ckpt, out_dir / 'last.ckpt')
 
@@ -184,26 +188,10 @@ def main():
                 'optimizer': optimizer.state_dict(),
                 'config': vars(args),
                 'image_size': (H, W),
-                'time_feat_dim': time_feat_dim,
+                'model_type': 'delta_field',
             }, out_dir / 'best.ckpt')
 
-    # 训练结束后根据需要导出 latent map 与 F2
-    if args.compute_latent:
-        print("Computing latent map with best checkpoint...")
-        # 重新加载最佳模型并计算整个图的 latent_map
-        best = torch.load(out_dir / 'best.ckpt', map_location=device)
-        model.load_state_dict(best['model'])
-        model.eval()
-        with torch.no_grad():
-            latent = model.compute_latent_map(H, W, device=device)
-        np.save(out_dir / 'latent_map.npy', latent.numpy())
-        # 保存 F2 的权重与 TorchScript 版本以便部署
-        f2_state = model.f2.state_dict()
-        torch.save(f2_state, out_dir / 'f2_state_dict.pt')
-        dummy_in = torch.randn(1, args.latent_dim + time_feat_dim, device=device)
-        f2_ts = torch.jit.trace(model.f2.eval(), dummy_in)
-        torch.jit.save(f2_ts, str(out_dir / 'f2_ts.pt'))
-        print("Exported latent_map.npy, f2_state_dict.pt, f2_ts.pt")
+    # 无导出步骤（直接用 ckpt 推理）
 
 
 if __name__ == '__main__':

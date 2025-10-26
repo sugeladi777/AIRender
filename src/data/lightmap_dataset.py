@@ -55,13 +55,26 @@ class LightMapTimeDataset(Dataset):
                  time_harmonics: int = 2,
                  sample_mode: str = 'random',
                  samples_per_epoch: Optional[int] = None,
-                 seed: int = 42):
+                 seed: int = 42,
+                 residual_mode: bool = False,
+                 baseline_time: int = 12):
         super().__init__()
         self.stack = _load_images(image_dir)  # [T, H, W, 3]
         self.T, self.H, self.W, _ = self.stack.shape
         self.time_harmonics = time_harmonics
         self.sample_mode = sample_mode
         self.rng = np.random.default_rng(seed)
+
+        # 残差模式：以某一时刻（默认 t=12）为基准，学习其他时间相对该基准图像的变化
+        self.residual_mode = residual_mode
+        # 将 baseline_time 规整到有效索引范围
+        if not isinstance(baseline_time, (int, np.integer)):
+            try:
+                baseline_time = int(round(float(baseline_time)))
+            except Exception:
+                baseline_time = 12
+        self.baseline_idx = int(max(0, min(self.T - 1, baseline_time)))
+        self._baseline_img = self.stack[self.baseline_idx]  # [H,W,3] in [0,1]
 
         total = self.T * self.H * self.W
         if self.sample_mode == 'all':
@@ -97,6 +110,9 @@ class LightMapTimeDataset(Dataset):
         t_feat = encode_time(t_norm, self.time_harmonics)  # [2*K]
 
         rgb = self.stack[t, y, x, :].astype(np.float32)
+        if self.residual_mode:
+            base = self._baseline_img[y, x, :].astype(np.float32)
+            rgb = rgb - base  # 残差可能在 [-1,1]
 
         return (
             torch.from_numpy(xy),
@@ -107,3 +123,8 @@ class LightMapTimeDataset(Dataset):
     @property
     def size(self) -> Tuple[int, int]:
         return self.H, self.W
+
+    @property
+    def baseline_image(self) -> np.ndarray:
+        """返回基准图像 [H,W,3]，范围 [0,1]。"""
+        return self._baseline_img

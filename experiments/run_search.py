@@ -17,6 +17,7 @@ import torch
 
 from src.data.lightmap_dataset import LightMapTimeDataset
 from src.utils.encoding import encode_time
+from src.models.delta_field import DeltaField, DeltaFieldConfig
 
 
 def build_cmd(config, data_dir, out_dir_base, num_workers=None):
@@ -30,21 +31,28 @@ def build_cmd(config, data_dir, out_dir_base, num_workers=None):
     cmd += ['--out_dir', run_out]
 
     # map rest of config
+    # 只传递 train.py 支持的参数
+    valid_keys = {
+        'epochs', 'batch_size', 'hidden', 'layers', 'time_harmonics', 'xy_harmonics', 'xy_include_input',
+        'lr', 'weight_decay', 'scheduler_patience', 'scheduler_factor', 'min_lr', 'clip_grad',
+        'samples_per_epoch', 'num_workers', 'seed', 'residual_mode', 'baseline_time', 'save_every'
+    }
+    # 参数中有些是布尔 flag（store_true），需要单独处理
+    flag_keys = {'xy_include_input'}
     for k, v in config.items():
-        if v is None:
+        if v is None or k == 'name' or k not in valid_keys:
             continue
-        if k == 'name':
-            continue
-        if isinstance(v, bool):
-            if v:
+        if k in flag_keys:
+            # 对于 flag：仅当 True 时添加不带值的标志
+            if bool(v):
                 cmd.append(f'--{k}')
+            continue
+        # 其它参数以 --key value 形式传递；布尔值显式为 True/False
+        cmd.append(f'--{k}')
+        if isinstance(v, bool):
+            cmd.append('True' if v else 'False')
         else:
-            cmd.append(f'--{k}')
             cmd.append(str(v))
-
-    # Ensure we export latent_map and F2 (needed for evaluation)
-    if '--compute_latent' not in cmd:
-        cmd.append('--compute_latent')
     if '--num_workers' not in cmd and num_workers is not None:
         cmd.append('--num_workers')
         cmd.append(str(num_workers))
@@ -145,7 +153,13 @@ def evaluate_run(run_out: str, data_dir: str):
 
     # load dataset stack (ground truth)
     try:
-        ds = LightMapTimeDataset(image_dir=data_dir, time_harmonics=best.get('config', {}).get('time_harmonics', 2), sample_mode='all')
+        cfg = best.get('config', {})
+        ds = LightMapTimeDataset(
+            image_dir=data_dir,
+            time_harmonics=cfg.get('time_harmonics', 2),
+            sample_mode='all',
+            residual_mode=False,  # 评估时先加载原始 GT 栈
+        )
         stack = ds.stack  # [T,H,W,3]
     except Exception as e:
         print(f"[WARN] Failed to load dataset for evaluation: {e}")
@@ -153,76 +167,42 @@ def evaluate_run(run_out: str, data_dir: str):
 
     T, H, W, _ = stack.shape
 
-    # load latent map
-    latent_path = os.path.join(run_out, 'latent_map.npy')
-    if os.path.exists(latent_path):
-        latent = np.load(latent_path)  # [H, W, latent_dim]
-    else:
-        # try to compute latent by loading model (fallback)
-        print(f"[WARN] latent_map.npy not found in {run_out}; trying to compute from checkpoint (may be slow)")
+    # Build DeltaField model if applicable
+    cfg = best.get('config', {})
+    is_delta = (best.get('model_type') == 'delta_field') or ('hidden' in cfg and 'layers' in cfg)
+    model = None
+    if is_delta:
         try:
-            from src.models.compressor import F1F2Model
-            cfg = best.get('config', {})
-            latent_dim = int(cfg.get('latent_dim', 64))
-            time_feat_dim = 2 * int(cfg.get('time_harmonics', 2))
-            model = F1F2Model(
-                latent_dim=latent_dim,
-                f1_hidden=int(cfg.get('hidden_f1', 64)),
-                f1_layers=int(cfg.get('layers_f1', 4)),
-                f2_hidden=int(cfg.get('hidden_f2', 64)),
-                f2_layers=int(cfg.get('layers_f2', 4)),
-                time_feat_dim=time_feat_dim,
-                xy_harmonics=int(cfg.get('xy_harmonics', 0)),
-                xy_include_input=bool(cfg.get('xy_include_input', False)),
+            df_cfg = DeltaFieldConfig(
+                time_harmonics=int(cfg.get('time_harmonics', 4)),
+                xy_harmonics=int(cfg.get('xy_harmonics', 4)),
+                xy_include_input=bool(cfg.get('xy_include_input', True)),
+                hidden=int(cfg.get('hidden', 64) if 'hidden' in cfg else cfg.get('hidden_f2', 64)),
+                layers=int(cfg.get('layers', 6) if 'layers' in cfg else cfg.get('layers_f2', 6)),
             )
+            model = DeltaField(df_cfg)
             model.load_state_dict(best['model'])
             model.eval()
-            with torch.no_grad():
-                latent_t = model.compute_latent_map(H, W, device=torch.device('cpu'))
-            latent = latent_t.numpy()
         except Exception as e:
-            print(f"[WARN] Could not compute latent_map: {e}")
+            print(f"[WARN] Could not build DeltaField from checkpoint: {e}")
             return None, None, None
 
-    # prefer traced F2 torchscript
-    f2_ts_path = os.path.join(run_out, 'f2_ts.pt')
-    f2_fn = None
-    use_torchscript = False
-    if os.path.exists(f2_ts_path):
-        try:
-            f2_ts = torch.jit.load(f2_ts_path, map_location='cpu')
-            f2_fn = lambda x: f2_ts(x)
-            use_torchscript = True
-        except Exception:
-            f2_fn = None
-
-    # fallback: try to build F2 from checkpoint
-    if f2_fn is None:
-        try:
-            from src.models.compressor import F1F2Model
-            cfg = best.get('config', {})
-            latent_dim = int(cfg.get('latent_dim', 64))
-            time_feat_dim = 2 * int(cfg.get('time_harmonics', 2))
-            model = F1F2Model(
-                latent_dim=latent_dim,
-                f1_hidden=int(cfg.get('hidden_f1', 64)),
-                f1_layers=int(cfg.get('layers_f1', 4)),
-                f2_hidden=int(cfg.get('hidden_f2', 64)),
-                f2_layers=int(cfg.get('layers_f2', 4)),
-                time_feat_dim=time_feat_dim,
-                xy_harmonics=int(cfg.get('xy_harmonics', 0)),
-                xy_include_input=bool(cfg.get('xy_include_input', False)),
-            )
-            model.load_state_dict(best['model'])
-            model.eval()
-            def _f2_call(x: torch.Tensor) -> torch.Tensor:
-                # x: [N, latent_dim+time_feat_dim]
-                with torch.no_grad():
-                    return model.f2(x)
-            f2_fn = _f2_call
-        except Exception as e:
-            print(f"[WARN] Could not build F2 from checkpoint: {e}")
-            return None, None, None
+    # 如果是残差模型，准备 baseline
+    residual_mode = bool(best.get('config', {}).get('residual_mode', False))
+    baseline_img = None
+    if residual_mode:
+        baseline_idx = int(best.get('config', {}).get('baseline_time', 12))
+        base_file = os.path.join(run_out, 'baseline.png')
+        if os.path.exists(base_file):
+            try:
+                from PIL import Image as _Image
+                baseline_img = np.array(_Image.open(base_file).convert('RGB'), dtype=np.float32) / 255.0
+            except Exception:
+                baseline_img = None
+        if baseline_img is None:
+            # fallback: 从数据集中取对应帧
+            if 0 <= baseline_idx < T:
+                baseline_img = stack[baseline_idx]
 
     # evaluate across frames
     psnrs = []
@@ -230,23 +210,22 @@ def evaluate_run(run_out: str, data_dir: str):
     preds = []
     for t in range(T):
         t_norm = float(t / 24.0)
-        t_feat = encode_time(t_norm, K=best.get('config', {}).get('time_harmonics', 2))
-        # latent: [H,W,latent_dim]
-        z = latent.reshape(-1, latent.shape[-1])  # [H*W, latent_dim]
-        # tile time
-        tf = np.array(t_feat, dtype=np.float32)
-        tf_tile = np.broadcast_to(tf, (z.shape[0], tf.shape[0]))  # [H*W, time_feat_dim]
-        inp = np.concatenate([z, tf_tile], axis=-1)
-        # to torch and run f2
         try:
-            tin = torch.from_numpy(inp).to(dtype=torch.float32)
-            tout = f2_fn(tin)
-            out_np = tout.cpu().numpy().reshape(H, W, 3)
+            if is_delta and model is not None:
+                with torch.no_grad():
+                    delta = DeltaField.render_image(model, H, W, t_norm, device=torch.device('cpu'))
+                out_np = delta.numpy()
+            else:
+                print('[WARN] Unsupported checkpoint type for evaluation.')
+                return None, None, None
         except Exception as e:
-            print(f"[WARN] Failed to run F2 for frame {t}: {e}")
+            print(f"[WARN] Failed to render frame {t}: {e}")
             return None, None, None
 
         gt = stack[t]
+        # 如果是残差模型，推理输出需加回 baseline
+        if residual_mode and baseline_img is not None:
+            out_np = out_np + baseline_img
         # clamp
         out_np = np.clip(out_np, 0.0, 1.0)
         preds.append(out_np)
@@ -333,8 +312,11 @@ def main():
             # set CUDA_VISIBLE_DEVICES if GPU assigned
             if gpu_assigned is not None:
                 env['CUDA_VISIBLE_DEVICES'] = str(gpu_assigned)
-            # reduce parallel OpenMP threads to avoid oversubscription
-            env.setdefault('OMP_NUM_THREADS', '1')
+            # 设置并行线程数，避免过度抢占；允许通过 cfg['omp_threads'] 覆盖
+            omp_threads = str(cfg.get('omp_threads', 1))
+            env.setdefault('OMP_NUM_THREADS', omp_threads)
+            env.setdefault('MKL_NUM_THREADS', omp_threads)
+            env.setdefault('OPENBLAS_NUM_THREADS', omp_threads)
             fh = open(log_path, 'w', encoding='utf-8')
             print('Spawning:', ' '.join(shlex.quote(x) for x in cmd), f'on GPU {gpu_assigned}')
             proc = subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT, cwd=os.getcwd(), env=env)
