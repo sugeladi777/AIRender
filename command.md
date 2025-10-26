@@ -9,5 +9,8 @@
 ## 使用checkpoint来推理渲染
 `python infer.py --ckpt D:\Project\AIRender\runs\delta_small\best.ckpt --baseline_path D:\Project\AIRender\dataset\tod_output\tod_12.png --time 18 --out D:\Project\AIRender\out\recon_18_with_base.png`
 
+## 批量推理渲染
+`python batch_infer.py --ckpt /home/lichengkai/AIRender/runs/experiments/exp_h64_l6_th4_xy4_lr5e-4_clip0.5_20251026_020154/best.ckpt --infer_script /home/lichengkai/AIRender/infer.py --output_dir /home/lichengkai/AIRender/out --start_hour 0 --end_hour 23 `
+
 ## 进行网络结构实验
 `python -m experiments.run_search --gpus 4 --num_workers 1 --space experiments\space.json --data_dir D:\Project\AIRender\dataset\tod_output --out_base runs\experiments`
