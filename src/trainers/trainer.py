@@ -23,6 +23,7 @@ class Trainer:
         out_dir: Path,
         image_size: tuple[int, int],
         save_every: int = 10,
+        config: Optional[Dict] = None,
     ) -> None:
         self.model = model
         self.optimizer = optimizer
@@ -32,6 +33,8 @@ class Trainer:
         self.out_dir = out_dir
         self.H, self.W = image_size
         self.save_every = save_every
+        # 可选的保存到 checkpoint 的配置字典（用于推理时恢复模型超参/模式等）
+        self.config = config if config is not None else {}
 
         self.best_loss: Optional[float] = None
 
@@ -69,6 +72,8 @@ class Trainer:
             'optimizer': self.optimizer.state_dict(),
             'image_size': (self.H, self.W),
             'model_type': 'delta_field',
+            # 包含训练时的配置（如 time_harmonics, residual_mode 等），供 infer/load 时使用
+            'config': self.config,
         }
         torch.save(ckpt, self.out_dir / f'{tag}.ckpt')
 

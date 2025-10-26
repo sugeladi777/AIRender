@@ -134,6 +134,16 @@ def main():
         out_dir=out_dir,
         image_size=(H, W),
         save_every=args.save_every,
+        # 保存训练时的关键配置，便于推理脚本从 ckpt 中恢复模型超参与残差模式
+        config={
+            'time_harmonics': args.time_harmonics,
+            'xy_harmonics': args.xy_harmonics,
+            'xy_include_input': args.xy_include_input,
+            'hidden': args.hidden,
+            'layers': args.layers,
+            'residual_mode': args.residual_mode,
+            'baseline_time': args.baseline_time,
+        },
     )
 
     trainer.fit(loader=loader, start_epoch=1, epochs=args.epochs)
