@@ -4,18 +4,18 @@
 
 ## 主要文件说明
 
-- `train.py`：训练单一 SIREN 模型 DeltaField（直接学习 ΔRGB），并保存 `baseline.png` 与 `best.ckpt`。
-- `infer.py`：加载 `best.ckpt` 和 `baseline.png`，渲染指定时间图像。
+- `scripts/train.py`：训练单一 SIREN 模型 DeltaField（直接学习 ΔRGB），并保存 `baseline.png` 与 `best.ckpt`。
+- `scripts/infer.py`：加载 `best.ckpt` 和 `baseline.png`，渲染指定时间图像。
 - `experiments/run_search.py`：并行实验与评估（支持 PSNR/SSIM/LPIPS），已适配 DeltaField。
 - `src/models/delta_field.py`：DeltaField 模型定义，内部使用 SIREN（`src/models/siren.py`）。
 - `src/data/lightmap_dataset.py`：加载序列数据并在残差模式下返回 `rgb - baseline` 作为监督信号。
 
 ## 环境与依赖
 
-主要依赖在 `requirements.txt`，建议：
+主要依赖在 `pip_requirements.txt`，建议：
 
 ```cmd
-pip install -r requirements.txt
+pip install -r pip_requirements.txt
 ```
 
 可选（用于完整评估指标）：
@@ -38,7 +38,7 @@ D:\Project\AIRender\dataset\tod_output
 训练（默认残差模式，以 t=12 为基准）：
 
 ```cmd
-python train.py --data_dir D:\Project\AIRender\dataset\tod_output --out_dir D:\Project\AIRender\runs\delta_t12 ^
+python scripts\train.py --data_dir D:\Project\AIRender\data\tod_output --out_dir D:\Project\AIRender\runs\delta_t12 ^
   --epochs 100 --batch_size 65536 --hidden 64 --layers 6 ^
   --time_harmonics 4 --xy_harmonics 4 --xy_include_input ^
   --num_workers 1 --residual_mode --baseline_time 12
@@ -47,7 +47,7 @@ python train.py --data_dir D:\Project\AIRender\dataset\tod_output --out_dir D:\P
 推理：
 
 ```cmd
-python infer.py --ckpt D:\Project\AIRender\runs\delta_t12\best.ckpt --time 18 --out D:\Project\AIRender\out\recon_18.png
+python scripts\infer.py --ckpt D:\Project\AIRender\runs\delta_t12\best.ckpt --time 18 --out D:\Project\AIRender\runs\recon_18.png
 ```
 
 运行实验（网格搜索）

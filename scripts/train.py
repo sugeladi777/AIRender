@@ -11,6 +11,7 @@ from tqdm import tqdm
 
 from src.data.lightmap_dataset import LightMapTimeDataset
 from src.models.delta_field import DeltaField, DeltaFieldConfig
+from src.trainers.trainer import Trainer
 
 
 def parse_args():
@@ -123,75 +124,19 @@ def main():
         optimizer, mode='min', factor=args.scheduler_factor, patience=args.scheduler_patience, min_lr=args.min_lr)
     criterion = nn.MSELoss()
 
-    best_loss: Optional[float] = None
+    # 使用封装的 Trainer 进行训练与保存
+    trainer = Trainer(
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        criterion=criterion,
+        device=device,
+        out_dir=out_dir,
+        image_size=(H, W),
+        save_every=args.save_every,
+    )
 
-    for epoch in range(1, args.epochs + 1):
-        model.train()
-        pbar = tqdm(loader, desc=f"Epoch {epoch}/{args.epochs}")
-        running_loss = 0.0
-        count = 0
-        for xy, t_feat, rgb in pbar:
-            # 将数据移动到 device，若使用 pin_memory 可使用 non_blocking 加速拷贝
-            non_block = True if device.type == 'cuda' else False
-            xy = xy.to(device, non_blocking=non_block)
-            t_feat = t_feat.to(device, non_blocking=non_block)
-            rgb = rgb.to(device, non_blocking=non_block)
-
-            pred = model(xy, t_feat)
-            loss = criterion(pred, rgb)
-
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-
-            # 梯度裁剪（若用户设置了 clip_grad > 0）
-            if args.clip_grad is not None and args.clip_grad > 0.0:
-                nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
-
-            optimizer.step()
-
-            bs = xy.shape[0]
-            running_loss += loss.item() * bs
-            count += bs
-            pbar.set_postfix(loss=running_loss / count)
-
-        epoch_loss = running_loss / max(1, count)
-
-        # 使用 ReduceLROnPlateau 调整学习率（以训练损失为监控指标）
-        try:
-            scheduler.step(epoch_loss)
-        except Exception:
-            # 如果 scheduler 未定义或出错，则跳过（保持向后兼容）
-            pass
-
-        # 打印当前学习率
-        current_lr = optimizer.param_groups[0].get('lr', args.lr)
-        print(f"Epoch {epoch} lr={current_lr:.6g}")
-
-        # 周期性保存检查点
-        if (epoch % args.save_every == 0) or (epoch == args.epochs):
-            ckpt = {
-                'epoch': epoch,
-                'model': model.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'config': vars(args),
-                'image_size': (H, W),
-                'model_type': 'delta_field',
-            }
-            torch.save(ckpt, out_dir / 'last.ckpt')
-
-        # 保存最优模型
-        if best_loss is None or epoch_loss < best_loss:
-            best_loss = epoch_loss
-            torch.save({
-                'epoch': epoch,
-                'model': model.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'config': vars(args),
-                'image_size': (H, W),
-                'model_type': 'delta_field',
-            }, out_dir / 'best.ckpt')
-
-    # 无导出步骤（直接用 ckpt 推理）
+    trainer.fit(loader=loader, start_epoch=1, epochs=args.epochs)
 
 
 if __name__ == '__main__':
