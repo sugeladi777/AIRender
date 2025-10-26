@@ -122,7 +122,8 @@ def main():
     # 使用 ReduceLROnPlateau 来根据训练损失自适应降低学习率
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=args.scheduler_factor, patience=args.scheduler_patience, min_lr=args.min_lr)
-    criterion = nn.MSELoss()
+    # 使用 L1 损失（相对于 MSE 更不偏向平滑，可保留边缘/细节）
+    criterion = nn.L1Loss()
 
     # 使用封装的 Trainer 进行训练与保存
     trainer = Trainer(
