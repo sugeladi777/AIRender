@@ -21,6 +21,11 @@ for hour in range(args.start_hour, args.end_hour + 1):
         '--out', output_path
     ]
     print(f'正在渲染第 {hour} 小时: {output_path}')
-    subprocess.run(cmd, check=True)
+    # Ensure project root is on PYTHONPATH so `from src...` imports work when running the script
+    env = os.environ.copy()
+    root = os.getcwd()
+    old_pp = env.get('PYTHONPATH', '')
+    env['PYTHONPATH'] = root + (os.pathsep + old_pp if old_pp else '')
+    subprocess.run(cmd, check=True, env=env)
 
 print('全部渲染完成，结果保存在', args.output_dir)

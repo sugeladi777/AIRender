@@ -12,13 +12,10 @@ python scripts\train.py --data_dir D:\Project\AIRender\data\tod_output ^
 	--residual_mode True --baseline_time 12
 ```
 
-## 完整测试（针对 RTX4060 推荐）
+## 完整测试
 ```
-python scripts\train.py --data_dir D:\Project\AIRender\data\tod_output ^
-	--out_dir D:\Project\AIRender\runs\delta_4060 ^
-	--epochs 100 --batch_size 65536 --hidden 64 --layers 6 ^
-	--time_harmonics 4 --xy_harmonics 4 --xy_include_input ^
-	--lr 5e-4 --num_workers 1 --residual_mode --baseline_time 12
+python -m scripts.train --data_dir /home/lichengkai/AIRender/data/tod_output \
+	--out_dir /home/lichengkai/AIRender/runs/delta
 ```
 
 ## 使用 checkpoint 来推理渲染
@@ -30,8 +27,8 @@ python scripts\infer.py --ckpt D:\Project\AIRender\runs\delta_small\best.ckpt ^
 
 ## 批量推理渲染 0-23 时
 ```
-python scripts\batch_infer.py --ckpt D:\Project\AIRender\runs\delta_small\best.ckpt ^
-	--infer_script scripts\infer.py --output_dir D:\Project\AIRender\runs\batch_infer ^
+python -m scripts.batch_infer --ckpt /home/lichengkai/AIRender/runs/delta/best.ckpt \
+	--infer_script /home/lichengkai/AIRender/scripts/infer.py --output_dir /home/lichengkai/AIRender/runs/batch_infer \
 	--start_hour 0 --end_hour 23
 ```
 

@@ -24,6 +24,7 @@ class Trainer:
         image_size: tuple[int, int],
         save_every: int = 10,
         config: Optional[Dict] = None,
+        clip_grad: float = 0.0,
     ) -> None:
         self.model = model
         self.optimizer = optimizer
@@ -35,14 +36,18 @@ class Trainer:
         self.save_every = save_every
         # 可选的保存到 checkpoint 的配置字典（用于推理时恢复模型超参/模式等）
         self.config = config if config is not None else {}
+        # 梯度裁剪阈值（L2 norm）；<=0 则不裁剪
+        self.clip_grad = float(clip_grad)
 
         self.best_loss: Optional[float] = None
 
-    def train_one_epoch(self, loader) -> float:
+    def train_one_epoch(self, loader, epoch: int = None, total_epochs: int = None) -> float:
         self.model.train()
         running_loss = 0.0
         count = 0
-        pbar = tqdm(loader, desc='Training')
+        if epoch is not None and total_epochs is not None:
+            print(f"\n==== Epoch {epoch}/{total_epochs} ====")
+        pbar = tqdm(loader, desc=f'Training Epoch {epoch}' if epoch is not None else 'Training')
         for batch in pbar:
             xy, t_feat, rgb = batch
             non_block = True if self.device.type == 'cuda' else False
@@ -55,6 +60,19 @@ class Trainer:
 
             self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
+
+            # 计算当前梯度范数并在需要时进行裁剪
+            if self.clip_grad is not None and self.clip_grad > 0.0:
+                # clip_grad_norm_ 返回裁剪前的总范数
+                total_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_grad)
+            else:
+                # 计算未裁剪的梯度范数用于诊断
+                total_norm = 0.0
+                for p in self.model.parameters():
+                    if p.grad is not None:
+                        total_norm += p.grad.data.norm(2).item() ** 2
+                total_norm = total_norm ** 0.5
+
             self.optimizer.step()
 
             bs = xy.shape[0]
@@ -63,6 +81,7 @@ class Trainer:
             pbar.set_postfix(loss=running_loss / max(1, count))
 
         epoch_loss = running_loss / max(1, count)
+        print(f"Epoch {epoch} finished. Avg loss: {epoch_loss:.6f}")
         return epoch_loss
 
     def _save_ckpt(self, tag: str, epoch: int):
@@ -79,7 +98,7 @@ class Trainer:
 
     def fit(self, loader, start_epoch: int, epochs: int):
         for epoch in range(start_epoch, epochs + 1):
-            epoch_loss = self.train_one_epoch(loader)
+            epoch_loss = self.train_one_epoch(loader, epoch=epoch, total_epochs=epochs)
 
             # 调整学习率
             try:
