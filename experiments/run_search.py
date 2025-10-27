@@ -35,12 +35,13 @@ def build_cmd(config, data_dir, out_dir_base, num_workers=None):
     valid_keys = {
         'epochs', 'batch_size', 'hidden', 'layers', 'time_harmonics',
         'grid_levels', 'channels_per_level',
+        'xy_harmonics', 'include_xy_input',
         'lr', 'weight_decay', 'scheduler_patience', 'scheduler_factor', 'min_lr', 'clip_grad',
         'samples_per_epoch', 'num_workers', 'seed', 'residual_mode', 'baseline_time', 'save_every'
     }
     # 需要单独处理的布尔 flag（store_true / store_false 风格）
     # 对于这些 key：当值为 True 时仅添加不带值的 `--key`；当值为 False 时添加 `--no_key`
-    flag_keys = {'residual_mode'}
+    flag_keys = {'residual_mode', 'include_xy_input'}
     for k, v in config.items():
         if v is None or k == 'name' or k not in valid_keys:
             continue
@@ -181,6 +182,8 @@ def evaluate_run(run_out: str, data_dir: str):
                 grid_levels=cfg.get('grid_levels', '16,32,64,128'),
                 channels_per_level=int(cfg.get('channels_per_level', 16)),
                 time_harmonics=int(cfg.get('time_harmonics', 8)),
+                xy_harmonics=int(cfg.get('xy_harmonics', 0)),
+                include_xy_input=bool(cfg.get('include_xy_input', False)),
                 mlp_hidden=int(cfg.get('mlp_hidden', cfg.get('hidden', 64))),
                 mlp_layers=int(cfg.get('mlp_layers', cfg.get('layers', 3))),
                 residual_mode=bool(cfg.get('residual_mode', True)),

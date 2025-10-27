@@ -7,7 +7,6 @@ from PIL import Image
 import torch
 
 from src.models.grid_mlp import GridMLP, GridMLPConfig
-from src.utils.encoding import encode_time
 
 
 def parse_args():
@@ -37,6 +36,8 @@ def main():
         grid_levels=cfg.get('grid_levels', '16,32,64,128'),
         channels_per_level=int(cfg.get('channels_per_level', 16)),
         time_harmonics=int(cfg.get('time_harmonics', 8)),
+        xy_harmonics=int(cfg.get('xy_harmonics', 0)),
+        include_xy_input=bool(cfg.get('include_xy_input', False)),
         mlp_hidden=int(cfg.get('mlp_hidden', 64)),
         mlp_layers=int(cfg.get('mlp_layers', 3)),
         residual_mode=bool(cfg.get('residual_mode', True)),

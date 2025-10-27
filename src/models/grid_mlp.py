@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..utils.encoding import encode_time
+from ..utils.encoding import encode_time, encode_xy
 
 
 def _parse_levels(levels: Sequence[int] | str) -> List[int]:
@@ -67,6 +67,9 @@ class GridMLPConfig:
     grid_levels: str = '16,32,64,128'
     channels_per_level: int = 16
     time_harmonics: int = 8
+    # xy positional encoding controls
+    xy_harmonics: int = 2            # 0 to disable Fourier encoding
+    include_xy_input: bool = True    # True to also include raw xy
     mlp_hidden: int = 64
     mlp_layers: int = 3
     residual_mode: bool = True
@@ -86,7 +89,9 @@ class GridMLP(nn.Module):
         self.cfg = cfg
         self.grid = MultiResGrid2D(cfg.grid_levels, cfg.channels_per_level)
         t_dim = 2 * max(0, int(cfg.time_harmonics))
-        in_dim = self.grid.out_dim + t_dim
+        # xy feature dim: (2 if include_xy_input else 0) + 4*K
+        xy_dim = (2 if bool(cfg.include_xy_input) else 0) + 4 * max(0, int(cfg.xy_harmonics))
+        in_dim = self.grid.out_dim + xy_dim + t_dim
 
         layers: List[nn.Module] = []
         hidden = cfg.mlp_hidden
@@ -99,14 +104,14 @@ class GridMLP(nn.Module):
         layers.append(nn.Linear(hidden, 3))
         self.mlp = nn.Sequential(*layers)
 
-    def forward(self, xy: torch.Tensor, t_feat: torch.Tensor | None = None, t_arr: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(self, xy: torch.Tensor, t_feat: torch.Tensor) -> torch.Tensor:
         grid_feat = self.grid(xy)  # [N, L*C]
-        if t_feat is None:
-            assert t_arr is not None, 'Provide either t_feat or t_arr'
-            t_feat = encode_time(t_arr, K=self.cfg.time_harmonics)
-            if not isinstance(t_feat, torch.Tensor):
-                t_feat = torch.from_numpy(t_feat).to(xy.device)
-        feat = torch.cat([grid_feat, t_feat], dim=-1)
+        # xy positional features (optional Fourier encoding and/or raw xy)
+        if (self.cfg.xy_harmonics > 0) or self.cfg.include_xy_input:
+            xy_feat = encode_xy(xy, K=int(self.cfg.xy_harmonics), include_input=bool(self.cfg.include_xy_input))
+        else:
+            xy_feat = xy.new_zeros((xy.shape[0], 0))
+        feat = torch.cat([grid_feat, xy_feat, t_feat], dim=-1)
         return self.mlp(feat)
 
     @staticmethod
@@ -120,12 +125,14 @@ class GridMLP(nn.Module):
         y_norm = (ys + 0.5) / H * 2 - 1
         xy = torch.stack([x_norm, y_norm], dim=-1).view(-1, 2)
         N = xy.shape[0]
-        t_arr = torch.full((N,), float(t_norm), device=device)
+        # precompute temporal features once and expand to N
+        t_vec = torch.full((N,), float(t_norm), device=device)
+        t_feat = encode_time(t_vec, K=model.cfg.time_harmonics)
         outs = []
         with torch.no_grad():
             for i in range(0, N, chunk):
                 j = min(i + chunk, N)
-                pred = model(xy[i:j], t_arr=t_arr[i:j])
+                pred = model(xy[i:j], t_feat=t_feat[i:j])
                 outs.append(pred)
         out = torch.cat(outs, dim=0).view(H, W, 3)
         return out

@@ -33,7 +33,15 @@ def parse_args():
     p.add_argument('--layers', type=int, default=8, help='MLP 隐藏层数量（增大以提升表达能力）')
 
     p.add_argument('--time_harmonics', type=int, default=8, help='时间 Fourier 编码的频率 K（time feature 维度 = 2*K），增大可表示更高频时变')
-    # Grid-MLP（方法B）相关：空间使用多分辨率特征网格，时间单独编码
+    p.add_argument('--xy_harmonics', type=int, default=2, help='xy 的 Fourier 编码频率 K（0 表示不编码）')
+    xy_group = p.add_mutually_exclusive_group()
+    xy_group.add_argument('--include_xy_input', dest='include_xy_input', action='store_true',
+                          help='将原始 xy 也拼接到输入（默认：关闭）')
+    xy_group.add_argument('--no_include_xy_input', dest='include_xy_input', action='store_false',
+                          help='不拼接原始 xy')
+    p.set_defaults(include_xy_input=True)
+
+    # Grid-MLP相关：空间使用多分辨率特征网格，时间单独编码
     p.add_argument('--grid_levels', type=str, default='16,32,64,128', help='多级特征网格分辨率，逗号分隔，例如 16,32,64,128')
     p.add_argument('--channels_per_level', type=int, default=16, help='每级特征通道数')
 
@@ -118,6 +126,8 @@ def main():
         grid_levels=args.grid_levels,
         channels_per_level=args.channels_per_level,
         time_harmonics=args.time_harmonics,
+        xy_harmonics=args.xy_harmonics,
+        include_xy_input=args.include_xy_input,
         mlp_hidden=args.hidden,
         mlp_layers=args.layers,
         residual_mode=args.residual_mode,
@@ -154,6 +164,8 @@ def main():
             'grid_levels': args.grid_levels,
             'channels_per_level': args.channels_per_level,
             'time_harmonics': args.time_harmonics,
+            'xy_harmonics': args.xy_harmonics,
+            'include_xy_input': args.include_xy_input,
             'mlp_hidden': args.hidden,
             'mlp_layers': args.layers,
             'residual_mode': args.residual_mode,
