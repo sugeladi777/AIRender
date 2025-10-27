@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from src.data.lightmap_dataset import LightMapTimeDataset
-from src.models.delta_field import DeltaField, DeltaFieldConfig
+from src.models.grid_mlp import GridMLP, GridMLPConfig
 from src.trainers.trainer import Trainer
 
 
@@ -19,29 +19,23 @@ def parse_args():
 
     主要参数包含数据路径、输出路径、训练超参与模型结构超参。
     """
-    p = argparse.ArgumentParser(description='训练 DeltaField：直接学习 f(x,y,t)->ΔRGB（以 baseline 为基准的残差）')
+    p = argparse.ArgumentParser(description='训练 GridMLP：多分辨率特征网格(空间) + 时间编码的小型 MLP，学习 ΔRGB')
     p.add_argument('--data_dir', type=str, required=True, help='包含 24 张图的文件夹，按字典序对应 t=0..23')
     p.add_argument('--out_dir', type=str, required=True, help='训练输出目录，用于保存检查点与导出结果')
 
     # 推荐实验配置（稳健性与收敛性折中）
     p.add_argument('--epochs', type=int, default=150, help='训练轮数（epoch），建议较多轮以充分拟合')
     p.add_argument('--batch_size', type=int, default=16384, help='每个 batch 的样本数；若显存充足可适当增大，否则减小以降低不稳定性')
-    p.add_argument('--lr', type=float, default=1e-4, help='学习率（Adam 默认），适合 SIREN/大模型')
+    p.add_argument('--lr', type=float, default=1e-4, help='学习率（Adam 默认），用于特征网格与小型 MLP')
 
     # 模型结构参数
-    p.add_argument('--hidden', type=int, default=256, help='SIREN 隐藏层宽度（增大以提升表达能力）')
-    p.add_argument('--layers', type=int, default=8, help='SIREN 隐藏层数量（增大以提升表达能力）')
+    p.add_argument('--hidden', type=int, default=256, help='MLP 隐藏层宽度（增大以提升表达能力）')
+    p.add_argument('--layers', type=int, default=8, help='MLP 隐藏层数量（增大以提升表达能力）')
 
     p.add_argument('--time_harmonics', type=int, default=8, help='时间 Fourier 编码的频率 K（time feature 维度 = 2*K），增大可表示更高频时变')
-    # XY/Time 编码
-    p.add_argument('--xy_harmonics', type=int, default=8, help='坐标 (x,y) 的 Fourier 编码频率 K_xy；0 表示不使用（增大以提升空间高频表达）')
-    # xy_include_input: 提供开启/关闭两种互斥 flag，默认启用
-    xy_group = p.add_mutually_exclusive_group()
-    xy_group.add_argument('--xy_include_input', dest='xy_include_input', action='store_true',
-                          help='在 XY 编码中包含原始 (x,y) 输入（默认：包含）')
-    xy_group.add_argument('--no_xy_include_input', dest='xy_include_input', action='store_false',
-                          help='在 XY 编码中不包含原始 (x,y) 输入')
-    p.set_defaults(xy_include_input=True)
+    # Grid-MLP（方法B）相关：空间使用多分辨率特征网格，时间单独编码
+    p.add_argument('--grid_levels', type=str, default='16,32,64,128', help='多级特征网格分辨率，逗号分隔，例如 16,32,64,128')
+    p.add_argument('--channels_per_level', type=int, default=16, help='每级特征通道数')
 
     # 优化器与学习率策略
     p.add_argument('--weight_decay', type=float, default=1e-5, help='AdamW 权重衰减（weight decay）')
@@ -119,18 +113,25 @@ def main():
         prefetch_factor=2,
     )
 
-    # 构建 DeltaField 模型
-    df_cfg = DeltaFieldConfig(
+    # 构建 GridMLP 模型（方法B）
+    gm_cfg = GridMLPConfig(
+        grid_levels=args.grid_levels,
+        channels_per_level=args.channels_per_level,
         time_harmonics=args.time_harmonics,
-        xy_harmonics=args.xy_harmonics,
-        xy_include_input=args.xy_include_input,
-        hidden=args.hidden,
-        layers=args.layers,
+        mlp_hidden=args.hidden,
+        mlp_layers=args.layers,
+        residual_mode=args.residual_mode,
     )
-    model = DeltaField(df_cfg).to(device)
+    model = GridMLP(gm_cfg).to(device)
 
-    # 使用 AdamW 并启用 weight decay
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    # 使用 AdamW 并启用 weight decay（网格与MLP采用不同学习率更稳健）
+    grid_params = list(model.grid.parameters())
+    grid_param_ids = {id(p) for p in grid_params}
+    mlp_params = [p for p in model.parameters() if id(p) not in grid_param_ids]
+    optimizer = torch.optim.AdamW([
+        {'params': grid_params, 'lr': max(args.lr, 1e-4)},
+        {'params': mlp_params, 'lr': args.lr},
+    ], weight_decay=args.weight_decay)
     # 使用 ReduceLROnPlateau 来根据训练损失自适应降低学习率
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=args.scheduler_factor, patience=args.scheduler_patience, min_lr=args.min_lr)
@@ -147,13 +148,14 @@ def main():
         image_size=(H, W),
         save_every=args.save_every,
         clip_grad=args.clip_grad,
+        model_type='grid_mlp',
         # 保存训练时的关键配置，便于推理脚本从 ckpt 中恢复模型超参与残差模式
         config={
+            'grid_levels': args.grid_levels,
+            'channels_per_level': args.channels_per_level,
             'time_harmonics': args.time_harmonics,
-            'xy_harmonics': args.xy_harmonics,
-            'xy_include_input': args.xy_include_input,
-            'hidden': args.hidden,
-            'layers': args.layers,
+            'mlp_hidden': args.hidden,
+            'mlp_layers': args.layers,
             'residual_mode': args.residual_mode,
             'baseline_time': args.baseline_time,
         },

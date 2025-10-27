@@ -16,8 +16,7 @@ import numpy as np
 import torch
 
 from src.data.lightmap_dataset import LightMapTimeDataset
-from src.utils.encoding import encode_time
-from src.models.delta_field import DeltaField, DeltaFieldConfig
+from src.models.grid_mlp import GridMLP, GridMLPConfig
 
 
 def build_cmd(config, data_dir, out_dir_base, num_workers=None):
@@ -25,7 +24,8 @@ def build_cmd(config, data_dir, out_dir_base, num_workers=None):
     run_out = os.path.join(out_dir_base, out_name + '_' + datetime.now().strftime('%Y%m%d_%H%M%S'))
     os.makedirs(run_out, exist_ok=True)
 
-    cmd = [sys.executable, 'train.py']
+    # 使用模块方式调用，确保路径稳定：python -m scripts.train
+    cmd = [sys.executable, '-m', 'scripts.train']
     # required args
     cmd += ['--data_dir', data_dir]
     cmd += ['--out_dir', run_out]
@@ -33,19 +33,23 @@ def build_cmd(config, data_dir, out_dir_base, num_workers=None):
     # map rest of config
     # 只传递 train.py 支持的参数
     valid_keys = {
-        'epochs', 'batch_size', 'hidden', 'layers', 'time_harmonics', 'xy_harmonics', 'xy_include_input',
+        'epochs', 'batch_size', 'hidden', 'layers', 'time_harmonics',
+        'grid_levels', 'channels_per_level',
         'lr', 'weight_decay', 'scheduler_patience', 'scheduler_factor', 'min_lr', 'clip_grad',
         'samples_per_epoch', 'num_workers', 'seed', 'residual_mode', 'baseline_time', 'save_every'
     }
-    # 参数中有些是布尔 flag（store_true），需要单独处理
-    flag_keys = {'xy_include_input'}
+    # 需要单独处理的布尔 flag（store_true / store_false 风格）
+    # 对于这些 key：当值为 True 时仅添加不带值的 `--key`；当值为 False 时添加 `--no_key`
+    flag_keys = {'residual_mode'}
     for k, v in config.items():
         if v is None or k == 'name' or k not in valid_keys:
             continue
         if k in flag_keys:
-            # 对于 flag：仅当 True 时添加不带值的标志
+            # 对于 flag：当 True 时添加 `--residual_mode`，当 False 时添加 `--no_residual_mode`
             if bool(v):
                 cmd.append(f'--{k}')
+            else:
+                cmd.append(f'--no_{k}')
             continue
         # 其它参数以 --key value 形式传递；布尔值显式为 True/False
         cmd.append(f'--{k}')
@@ -167,24 +171,25 @@ def evaluate_run(run_out: str, data_dir: str):
 
     T, H, W, _ = stack.shape
 
-    # Build DeltaField model if applicable
+    # Build GridMLP model from checkpoint
     cfg = best.get('config', {})
-    is_delta = (best.get('model_type') == 'delta_field') or ('hidden' in cfg and 'layers' in cfg)
+    is_grid = (best.get('model_type') == 'grid_mlp') or ('grid_levels' in cfg)
     model = None
-    if is_delta:
+    if is_grid:
         try:
-            df_cfg = DeltaFieldConfig(
-                time_harmonics=int(cfg.get('time_harmonics', 4)),
-                xy_harmonics=int(cfg.get('xy_harmonics', 4)),
-                xy_include_input=bool(cfg.get('xy_include_input', True)),
-                hidden=int(cfg.get('hidden', 64) if 'hidden' in cfg else cfg.get('hidden_f2', 64)),
-                layers=int(cfg.get('layers', 6) if 'layers' in cfg else cfg.get('layers_f2', 6)),
+            gm_cfg = GridMLPConfig(
+                grid_levels=cfg.get('grid_levels', '16,32,64,128'),
+                channels_per_level=int(cfg.get('channels_per_level', 16)),
+                time_harmonics=int(cfg.get('time_harmonics', 8)),
+                mlp_hidden=int(cfg.get('mlp_hidden', cfg.get('hidden', 64))),
+                mlp_layers=int(cfg.get('mlp_layers', cfg.get('layers', 3))),
+                residual_mode=bool(cfg.get('residual_mode', True)),
             )
-            model = DeltaField(df_cfg)
+            model = GridMLP(gm_cfg)
             model.load_state_dict(best['model'])
             model.eval()
         except Exception as e:
-            print(f"[WARN] Could not build DeltaField from checkpoint: {e}")
+            print(f"[WARN] Could not build GridMLP from checkpoint: {e}")
             return None, None, None
 
     # 如果是残差模型，准备 baseline
@@ -211,9 +216,9 @@ def evaluate_run(run_out: str, data_dir: str):
     for t in range(T):
         t_norm = float(t / 24.0)
         try:
-            if is_delta and model is not None:
+            if is_grid and model is not None:
                 with torch.no_grad():
-                    delta = DeltaField.render_image(model, H, W, t_norm, device=torch.device('cpu'))
+                    delta = GridMLP.render_image(model, H, W, t_norm, device=torch.device('cpu'))
                 out_np = delta.numpy()
             else:
                 print('[WARN] Unsupported checkpoint type for evaluation.')

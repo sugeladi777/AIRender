@@ -5,7 +5,7 @@
 ## 顶层目录
 - src/                源码包（保持模块导入路径为 `src.*`，兼容现有代码）
   - data/            数据集与数据加载相关
-  - models/          模型定义（SIREN、DeltaField 等）
+  - models/          模型定义（GridMLP、多分辨率特征网格等）
   - utils/           工具方法（编码、通用工具）
   - trainers/        训练器（预留，当前为空，可后续扩展）
 - scripts/            命令行脚本（训练、推理、批量推理）

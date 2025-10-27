@@ -25,6 +25,7 @@ class Trainer:
         save_every: int = 10,
         config: Optional[Dict] = None,
         clip_grad: float = 0.0,
+        model_type: str = 'grid_mlp',
     ) -> None:
         self.model = model
         self.optimizer = optimizer
@@ -38,6 +39,7 @@ class Trainer:
         self.config = config if config is not None else {}
         # 梯度裁剪阈值（L2 norm）；<=0 则不裁剪
         self.clip_grad = float(clip_grad)
+        self.model_type = str(model_type)
 
         self.best_loss: Optional[float] = None
 
@@ -90,8 +92,7 @@ class Trainer:
             'model': self.model.state_dict(),
             'optimizer': self.optimizer.state_dict(),
             'image_size': (self.H, self.W),
-            'model_type': 'delta_field',
-            # 包含训练时的配置（如 time_harmonics, residual_mode 等），供 infer/load 时使用
+            'model_type': self.model_type,
             'config': self.config,
         }
         torch.save(ckpt, self.out_dir / f'{tag}.ckpt')
