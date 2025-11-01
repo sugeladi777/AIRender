@@ -9,7 +9,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from src.data.lightmap_dataset import LightMapTimeDataset
+from src.data.dataset import HPRCLightmapDataset
 from src.models.grid_mlp import GridMLP, GridMLPConfig
 from src.trainers.trainer import Trainer
 
@@ -19,8 +19,9 @@ def parse_args():
 
     主要参数包含数据路径、输出路径、训练超参与模型结构超参。
     """
-    p = argparse.ArgumentParser(description='训练 GridMLP：多分辨率特征网格(空间) + 时间编码的小型 MLP，学习 ΔRGB')
-    p.add_argument('--data_dir', type=str, required=True, help='包含 24 张图的文件夹，按字典序对应 t=0..23')
+    p = argparse.ArgumentParser(description='训练 GridMLP：多分辨率特征网格(空间) + 时间编码的小型 MLP，学习 ΔRGB（HPRC 二进制数据）')
+    p.add_argument('--hprc_dir', type=str, required=True, help='HPRC 数据根目录（包含 config.json 与 Data/ 二进制文件）')
+    p.add_argument('--hprc_index', type=int, default=0, help='选择训练的 lightmap 索引（见 config.json 的 lightmap_list 顺序）')
     p.add_argument('--out_dir', type=str, required=True, help='训练输出目录，用于保存检查点与导出结果')
 
     # 推荐实验配置（稳健性与收敛性折中）
@@ -93,14 +94,16 @@ def main():
         torch.backends.cudnn.benchmark = True
 
     # 数据集与 DataLoader
-    dataset = LightMapTimeDataset(
-        image_dir=args.data_dir,
+    dataset = HPRCLightmapDataset(
+        hprc_dir=args.hprc_dir,
+        lightmap_index=args.hprc_index,
         time_harmonics=args.time_harmonics,
         sample_mode='random' if args.samples_per_epoch is not None else 'all',
         samples_per_epoch=args.samples_per_epoch,
         seed=args.seed,
         residual_mode=args.residual_mode,
         baseline_time=args.baseline_time,
+        use_masks=True,
     )
     H, W = dataset.size
 
@@ -170,6 +173,8 @@ def main():
             'mlp_layers': args.layers,
             'residual_mode': args.residual_mode,
             'baseline_time': args.baseline_time,
+            'hprc_dir': args.hprc_dir,
+            'hprc_index': args.hprc_index,
         },
     )
 

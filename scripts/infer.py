@@ -7,6 +7,7 @@ from PIL import Image
 import torch
 
 from src.models.grid_mlp import GridMLP, GridMLPConfig
+from src.data.dataset import load_hprc_lightmap_spec
 
 
 def parse_args():
@@ -57,7 +58,24 @@ def main():
             if base_candidate.exists():
                 baseline_img = np.array(Image.open(base_candidate).convert('RGB'), dtype=np.float32) / 255.0
             else:
-                print('[WARN] residual_mode=True 但未找到 baseline.png，将直接输出残差结果。')
+                # 尝试从 ckpt 配置中的 HPRC 数据读取 baseline 帧
+                try:
+                    hdir = cfg.get('hprc_dir', None)
+                    hidx = int(cfg.get('hprc_index', 0))
+                    btime = int(cfg.get('baseline_time', 12))
+                    if hdir is not None:
+                        spec = load_hprc_lightmap_spec(hdir, hidx)
+                        base_key = int(round(float(btime) * 100))
+                        if base_key not in spec.time_keys:
+                            base_key = min(spec.time_keys, key=lambda k: abs(k - base_key))
+                        lm_path = os.path.join(hdir if os.path.isdir(os.path.join(hdir, 'Data')) is False else os.path.join(hdir, 'Data'), spec.lightmaps[base_key])
+                        H, W = H, W
+                        data = np.fromfile(lm_path, dtype=np.float32)
+                        baseline_img = data.reshape(H, W, 3)
+                    else:
+                        print('[WARN] residual_mode=True 但未找到 baseline.png，也未在 ckpt.config 中找到 hprc_dir，直接输出残差结果。')
+                except Exception as e:
+                    print('[WARN] 无法从 HPRC 数据读取 baseline：', e)
 
     # 规范时间到 [0,24] 并归一化为 [0,1]
     t = float(args.time)

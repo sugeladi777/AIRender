@@ -15,11 +15,11 @@ from typing import Optional
 import numpy as np
 import torch
 
-from src.data.lightmap_dataset import LightMapTimeDataset
+from src.data.dataset import load_hprc_lightmap_spec
 from src.models.grid_mlp import GridMLP, GridMLPConfig
 
 
-def build_cmd(config, data_dir, out_dir_base, num_workers=None):
+def build_cmd(config, hprc_dir, out_dir_base, num_workers=None):
     out_name = config.get('name') or f"exp_{int(time.time())}"
     run_out = os.path.join(out_dir_base, out_name + '_' + datetime.now().strftime('%Y%m%d_%H%M%S'))
     os.makedirs(run_out, exist_ok=True)
@@ -27,8 +27,11 @@ def build_cmd(config, data_dir, out_dir_base, num_workers=None):
     # 使用模块方式调用，确保路径稳定：python -m scripts.train
     cmd = [sys.executable, '-m', 'scripts.train']
     # required args
-    cmd += ['--data_dir', data_dir]
+    cmd += ['--hprc_dir', hprc_dir]
     cmd += ['--out_dir', run_out]
+    # allow per-config lightmap index
+    if 'hprc_index' in config:
+        cmd += ['--hprc_index', str(int(config['hprc_index']))]
 
     # map rest of config
     # 只传递 train.py 支持的参数
@@ -91,13 +94,16 @@ def compute_psnr(img_gt: np.ndarray, img_pred: np.ndarray) -> float:
 
 
 def compute_ssim(img_gt: np.ndarray, img_pred: np.ndarray) -> Optional[float]:
-    # try skimage first
+    # try skimage dynamically to avoid hard import errors
     try:
-        from skimage.metrics import structural_similarity as ssim
-        val = ssim(img_gt, img_pred, multichannel=True, data_range=1.0)
+        import importlib
+        metrics_mod = importlib.import_module('skimage.metrics')
+        val = metrics_mod.structural_similarity(img_gt, img_pred, channel_axis=-1 if hasattr(metrics_mod, 'structural_similarity') else None, multichannel=True, data_range=1.0)
+        # Note: newer skimage uses channel_axis; older uses multichannel
+        if isinstance(val, tuple):
+            val = val[0]
         return float(val)
     except Exception:
-        # skimage not available or failed
         return None
 
 
@@ -137,8 +143,9 @@ def compute_lpips_stack(imgs_gt: np.ndarray, imgs_pred: np.ndarray) -> Optional[
     return float(np.mean(vals))
 
 
-def evaluate_run(run_out: str, data_dir: str):
-    """Evaluate trained run by loading latent_map and F2 and computing PSNR/SSIM/LPIPS over all frames.
+def evaluate_run(run_out: str, hprc_dir: str, hprc_index: int):
+    """Evaluate a trained run on HPRC dataset by rendering all available time keys
+    and comparing against ground truth lightmaps.
 
     Returns tuple (psnr_mean, ssim_mean_or_None, lpips_mean_or_None)
     """
@@ -156,21 +163,27 @@ def evaluate_run(run_out: str, data_dir: str):
         print(f"[WARN] Failed to load checkpoint {best_path}: {e}")
         return None, None, None
 
-    # load dataset stack (ground truth)
+    # load HPRC ground truth stack
     try:
-        cfg = best.get('config', {})
-        ds = LightMapTimeDataset(
-            image_dir=data_dir,
-            time_harmonics=cfg.get('time_harmonics', 2),
-            sample_mode='all',
-            residual_mode=False,  # 评估时先加载原始 GT 栈
-        )
-        stack = ds.stack  # [T,H,W,3]
+        spec = load_hprc_lightmap_spec(hprc_dir, int(hprc_index))
+        H, W = spec.resolution
+        data_root = os.path.join(hprc_dir, 'Data') if os.path.isdir(os.path.join(hprc_dir, 'Data')) else hprc_dir
+        time_keys = list(spec.time_keys)
+        stack_list = []
+        for tk in time_keys:
+            lm_path = os.path.join(data_root, spec.lightmaps[tk])
+            arr = np.fromfile(lm_path, dtype=np.float32)
+            try:
+                arr = arr.reshape(H, W, 3)
+            except Exception:
+                print(f"[WARN] Bad lightmap shape for {lm_path}")
+                return None, None, None
+            stack_list.append(arr)
+        stack = np.stack(stack_list, axis=0)  # [T,H,W,3]
+        T = stack.shape[0]
     except Exception as e:
-        print(f"[WARN] Failed to load dataset for evaluation: {e}")
+        print(f"[WARN] Failed to load HPRC dataset for evaluation: {e}")
         return None, None, None
-
-    T, H, W, _ = stack.shape
 
     # Build GridMLP model from checkpoint
     cfg = best.get('config', {})
@@ -208,16 +221,22 @@ def evaluate_run(run_out: str, data_dir: str):
             except Exception:
                 baseline_img = None
         if baseline_img is None:
-            # fallback: 从数据集中取对应帧
-            if 0 <= baseline_idx < T:
-                baseline_img = stack[baseline_idx]
+            # fallback: 从 HPRC 数据集中取 baseline 时间（最近匹配）
+            base_key = int(round(float(baseline_idx) * 100))
+            if base_key not in spec.time_keys:
+                base_key = min(spec.time_keys, key=lambda k: abs(k - base_key))
+            try:
+                bi = np.fromfile(os.path.join(data_root, spec.lightmaps[base_key]), dtype=np.float32).reshape(H, W, 3)
+                baseline_img = bi
+            except Exception:
+                baseline_img = None
 
     # evaluate across frames
     psnrs = []
     ssims = []
     preds = []
-    for t in range(T):
-        t_norm = float(t / 24.0)
+    for i, tk in enumerate(time_keys):
+        t_norm = float((tk / 100.0) / 24.0)
         try:
             if is_grid and model is not None:
                 with torch.no_grad():
@@ -227,10 +246,10 @@ def evaluate_run(run_out: str, data_dir: str):
                 print('[WARN] Unsupported checkpoint type for evaluation.')
                 return None, None, None
         except Exception as e:
-            print(f"[WARN] Failed to render frame {t}: {e}")
+            print(f"[WARN] Failed to render frame {i} (tk={tk}): {e}")
             return None, None, None
 
-        gt = stack[t]
+        gt = stack[i]
         # 如果是残差模型，推理输出需加回 baseline
         if residual_mode and baseline_img is not None:
             out_np = out_np + baseline_img
@@ -268,7 +287,8 @@ def run_experiment(cmd, run_out):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--space', type=str, default='experiments/space.json', help='JSON file with list of configs')
-    parser.add_argument('--data_dir', type=str, required=True, help='Path to dataset')
+    parser.add_argument('--hprc_dir', type=str, required=True, help='Path to HPRC dataset root (contains config.json)')
+    parser.add_argument('--hprc_index', type=int, default=0, help='Lightmap index to train/evaluate')
     parser.add_argument('--out_base', type=str, default='runs/experiments', help='Base output dir for experiments')
     parser.add_argument('--space_id', type=int, default=None, help='If set, only run that index in the space (0-based)')
     parser.add_argument('--gpus', type=int, default=1, help='Number of GPUs to run in parallel (uses CUDA_VISIBLE_DEVICES)')
@@ -333,7 +353,7 @@ def main():
         next_gpu_idx = 0
         for idx, cfg in enumerate(space):
             try:
-                cmd, run_out = build_cmd(cfg, args.data_dir, args.out_base, num_workers=args.num_workers if hasattr(args, 'num_workers') else None)
+                cmd, run_out = build_cmd(cfg, args.hprc_dir, args.out_base, num_workers=args.num_workers if hasattr(args, 'num_workers') else None)
 
                 # wait for a free slot if needed
                 while len(running) >= max_concurrent:
@@ -349,7 +369,7 @@ def main():
                             rc = r['proc'].returncode
                             # evaluate
                             try:
-                                psnr_mean, ssim_mean, lpips_mean = evaluate_run(r['run_out'], args.data_dir)
+                                psnr_mean, ssim_mean, lpips_mean = evaluate_run(r['run_out'], args.hprc_dir, args.hprc_index)
                             except Exception as e:
                                 print('Evaluation failed:', e)
                                 psnr_mean, ssim_mean, lpips_mean = None, None, None
@@ -403,7 +423,7 @@ def main():
                     final_loss = extract_final_loss(r['log_path'])
                     rc = r['proc'].returncode
                     try:
-                        psnr_mean, ssim_mean, lpips_mean = evaluate_run(r['run_out'], args.data_dir)
+                        psnr_mean, ssim_mean, lpips_mean = evaluate_run(r['run_out'], args.hprc_dir, args.hprc_index)
                     except Exception as e:
                         print('Evaluation failed:', e)
                         psnr_mean, ssim_mean, lpips_mean = None, None, None
