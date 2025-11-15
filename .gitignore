@@ -1,0 +1,13 @@
+test/Parameters/*
+trunk/Data/*
+wangziwen/Parameters/*
+test/Parameters/*
+trunk/YourSrc/Parameters/*
+trunk/YourSrc/ResultImages/*
+trunk/YourSrc/nohup.out
+.svn/
+*.svn
+# Python 缓存文件
+__pycache__/
+*.py[cod]
+*$py.class

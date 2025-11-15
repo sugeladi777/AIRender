@@ -1,0 +1,6 @@
+# --index-url https://download.pytorch.org/whl/cu121
+# torch
+numpy
+OpenEXR
+lpips
+torchmetrics

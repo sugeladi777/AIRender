@@ -1,0 +1,16 @@
+metrics:
+  psnr:
+    best_value: 55.0dB
+    worst_value: 20.0dB
+  ssim:
+    best_value: 0.999
+    worst_value: 0.73
+  lpips:
+    best_value: 0.0003
+    worst_value: 0.3
+  inference time:
+    best_value: 0.00s
+    worst_value: 300s
+  compression ratio:
+    best_value: 0%
+    worst_value: 50%
